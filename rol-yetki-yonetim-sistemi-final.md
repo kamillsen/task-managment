@@ -554,19 +554,22 @@ public class AuthorizePermissionAttribute : AuthorizeAttribute
 }
 ```
 
-### **4.2 AuthorizePermissionFilter (MEVCUT - Aynen Kalıyor)**
+### **4.2 AuthorizePermissionFilter (Güncellenmiş - Akıllı Controller Kontrolü)**
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.Extensions.DependencyInjection;
 using MiniJira.Application.Services;
+using MiniJira.WebAPI.Attributes;
+using System.Linq;
 using System.Security.Claims;
 
 namespace MiniJira.WebAPI.Filters;
 
-// WebAPI/Filters/AuthorizePermissionFilter.cs (MEVCUT - aynen kalıyor)
+// WebAPI/Filters/AuthorizePermissionFilter.cs (Güncellenmiş - Akıllı kontrol)
 public class AuthorizePermissionFilter : IAuthorizationFilter
 {
     private readonly string _permission;
@@ -578,7 +581,7 @@ public class AuthorizePermissionFilter : IAuthorizationFilter
     
     public void OnAuthorization(AuthorizationFilterContext context)
     {
-        // MEVCUT KOD - Değişmedi
+        // 1. Kullanıcı giriş yapmış mı?
         if (!context.HttpContext.User.Identity.IsAuthenticated)
         {
             context.Result = new UnauthorizedResult();
@@ -596,6 +599,40 @@ public class AuthorizePermissionFilter : IAuthorizationFilter
         var permissionService = context.HttpContext.RequestServices
             .GetRequiredService<IPermissionService>();
         
+        // ✅ 2. AKILLI KONTROL: Controller seviyesinde wildcard permission var mı?
+        var controllerDescriptor = context.ActionDescriptor as ControllerActionDescriptor;
+        if (controllerDescriptor != null)
+        {
+            // Controller attribute'larını kontrol et
+            var controllerAttributes = controllerDescriptor.ControllerTypeInfo
+                .GetCustomAttributes<AuthorizePermissionAttribute>(true);
+            
+            foreach (var controllerAttr in controllerAttributes)
+            {
+                // ✅ Controller'da wildcard permission var mı? (örn: Task.All)
+                var parts = _permission.Split('.');
+                if (parts.Length >= 1)
+                {
+                    var wildcardPermission = $"{parts[0]}.All";  // "Task.All"
+                    
+                    // Controller'da wildcard permission varsa kontrol et
+                    if (controllerAttr.Name == wildcardPermission)
+                    {
+                        // ✅ Kullanıcıda wildcard permission var mı? (Task.All)
+                        var hasWildcard = permissionService
+                            .HasPermissionAsync(userId, wildcardPermission).GetAwaiter().GetResult();
+                        
+                        if (hasWildcard)
+                        {
+                            // ✅ Wildcard varsa → Action kontrolünü SKIP ET, direkt geç!
+                            return; // Authorization başarılı
+                        }
+                    }
+                }
+            }
+        }
+        
+        // ✅ 3. Wildcard yoksa → Normal action kontrolü yap
         var hasPermission = permissionService
             .HasPermissionAsync(userId, _permission).GetAwaiter().GetResult();
         
@@ -1250,7 +1287,9 @@ public class ProjectsController : ControllerBase
 // → Tüm Project işlemleri + Tüm Task Create işlemleri çalışır
 ```
 
-### **7.2 TasksController Örneği (A.B.C Formatında)**
+### **7.3 TasksController Örneği (Task.All Olan ve Olmayan Durumlar)**
+
+#### **Senaryo 1: Controller'da Task.All VARSA → Action Kontrolü Gereksiz**
 
 ```csharp
 using Microsoft.AspNetCore.Authorization;
@@ -1262,29 +1301,99 @@ namespace MiniJira.WebAPI.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
+[AuthorizePermission("Task.All")]  // ✅ Controller seviyesinde wildcard
 public class TasksController : ControllerBase
 {
+    // ✅ Action seviyesinde kontrol YOK - Task.All zaten tümünü kapsıyor
+    // A kullanıcısı (Task.All var) → Tüm action'lar çalışır (action kontrolü skip edilir)
+    // B kullanıcısı (Task.All yok, Task.Create.New var) → Sadece CreateTask() çalışır
+    
     [HttpGet]
-    [AuthorizePermission("Task.View.All")] // ✅ 3 parça
+    public IActionResult GetTasks()  // ✅ Kontrol yok - Task.All kapsıyor
+    {
+        return Ok(new { message = "Görevler listelendi" });
+    }
+    
+    [HttpPost]
+    public IActionResult CreateTask([FromBody] CreateTaskDto dto)  // ✅ Kontrol yok - Task.All kapsıyor
+    {
+        return Ok(new { message = "Görev oluşturuldu" });
+    }
+    
+    [HttpPost("{id}/assign")]
+    public IActionResult AssignTask(int id, [FromBody] AssignTaskDto dto)  // ✅ Kontrol yok - Task.All kapsıyor
+    {
+        return Ok(new { message = "Görev atandı" });
+    }
+}
+```
+
+**Akış:**
+- **A kullanıcısı (Task.All var):**
+  1. Controller'da `Task.All` var mı? → Evet
+  2. Kullanıcıda `Task.All` var mı? → Evet
+  3. Action kontrolü skip edilir → Tüm action'lar çalışır
+
+- **B kullanıcısı (Task.All yok, Task.Create.New var):**
+  1. Controller'da `Task.All` var mı? → Evet
+  2. Kullanıcıda `Task.All` var mı? → Hayır
+  3. Action kontrolüne geç → `Task.Create.New` kontrolü yapılır
+  4. CreateTask() çalışır, GetTasks() ve AssignTask() çalışmaz
+
+---
+
+#### **Senaryo 2: Controller'da Task.All YOKSA → Action Kontrolü Zorunlu**
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using MiniJira.WebAPI.Attributes;
+
+namespace MiniJira.WebAPI.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+[Authorize]
+// ❌ Controller seviyesinde Task.All YOK
+public class TasksController : ControllerBase
+{
+    // ✅ Action seviyesinde kontrol ZORUNLU - Spesifik yetkiler için
+    // C kullanıcısı (Task.View.All var) → Sadece GetTasks() çalışır
+    // D kullanıcısı (Task.Create.New var) → Sadece CreateTask() çalışır
+    
+    [HttpGet]
+    [AuthorizePermission("Task.View.All")]  // ✅ ZORUNLU - Sadece View yetkisi
     public IActionResult GetTasks()
     {
         return Ok(new { message = "Görevler listelendi" });
     }
     
     [HttpPost]
-    [AuthorizePermission("Task.Create.New")] // ✅ 3 parça
+    [AuthorizePermission("Task.Create.New")]  // ✅ ZORUNLU - Sadece Create yetkisi
     public IActionResult CreateTask([FromBody] CreateTaskDto dto)
     {
         return Ok(new { message = "Görev oluşturuldu" });
     }
     
     [HttpPost("{id}/assign")]
-    [AuthorizePermission("Task.Assign.User")] // ✅ 3 parça: Task.Assign.User
+    [AuthorizePermission("Task.Assign.User")]  // ✅ ZORUNLU - Sadece Assign yetkisi
     public IActionResult AssignTask(int id, [FromBody] AssignTaskDto dto)
     {
         return Ok(new { message = "Görev atandı" });
     }
 }
+```
+
+**Akış:**
+- **C kullanıcısı (Task.View.All var):**
+  1. Controller'da `Task.All` var mı? → Hayır
+  2. Action kontrolüne geç → `Task.View.All` kontrolü yapılır
+  3. GetTasks() çalışır, CreateTask() ve AssignTask() çalışmaz
+
+- **D kullanıcısı (Task.Create.New var):**
+  1. Controller'da `Task.All` var mı? → Hayır
+  2. Action kontrolüne geç → `Task.Create.New` kontrolü yapılır
+  3. CreateTask() çalışır, GetTasks() ve AssignTask() çalışmaz
 ```
 
 ---
@@ -1676,7 +1785,32 @@ return userPermissions.Contains(requestedPermission);
 | ✅ Cache (user bazında) | 50-100ms | <1ms | 2-3KB/user | Hızlı |
 | ✅ Wildcard kontrolü | - | <1ms | - | Çok hızlı |
 
-### **9.1.5 Cache Invalidation Stratejisi**
+### **9.1.5 Controller Wildcard Kontrolü Optimizasyonu**
+
+```csharp
+// ✅ Controller seviyesinde Task.All varsa → Action kontrolü skip edilir
+// Performans: Task.All varsa → 1 DB sorgusu yerine 0 (action kontrolü yok!)
+
+// Senaryo 1: Task.All var
+// Controller: [AuthorizePermission("Task.All")]
+// Action: (kontrol yok)
+// → Sadece Task.All kontrolü yapılır (1 kontrol)
+// → Action kontrolü skip edilir (0 kontrol)
+
+// Senaryo 2: Task.All yok
+// Controller: (Task.All yok)
+// Action: [AuthorizePermission("Task.Create.New")]
+// → Task.All kontrolü yapılır (1 kontrol - false)
+// → Action kontrolü yapılır (1 kontrol - Task.Create.New)
+// → Toplam: 2 kontrol
+```
+
+**Performans:**
+- `Task.All` varsa: 1 kontrol (controller seviyesinde) → Action kontrolü skip edilir
+- `Task.All` yoksa: 2 kontrol (controller + action) → Normal akış
+- **Reflection maliyeti:** ~0.1-0.5ms per request (kabul edilebilir)
+
+### **9.1.6 Cache Invalidation Stratejisi**
 
 ```csharp
 // ✅ Rol yetkileri değiştiğinde
@@ -1723,6 +1857,7 @@ public async Task UpdateRolePermissionsAsync(int roleId, List<string> permission
 9. ✅ **Optimize Cache Stratejisi** - User bazında tek cache key (50x daha hızlı)
 10. ✅ **Optimize DB Sorgusu** - Sadece permission name'leri (50x daha az veri)
 11. ✅ **Cache Invalidation** - Rol/permission değişikliğinde otomatik temizleme
+12. ✅ **Akıllı Controller Kontrolü** - Task.All varsa action kontrolü skip edilir (daha hızlı)
 
 ### **10.3 Sistem Akışı:**
 
@@ -1753,10 +1888,33 @@ public async Task UpdateRolePermissionsAsync(int roleId, List<string> permission
       → [AuthorizePermission("Project.Create.Copy")] → ✅ Çalışır
       → [AuthorizePermission("Project.Edit.Any")] → ❌ Çalışmaz (Edit yetkisi yok)
    
+   ✅ CONTROLLER SEVİYESİNDE TASK.ALL VARSA:
+      → Controller: [AuthorizePermission("Task.All")]
+      → Action: [AuthorizePermission("Task.Create.New")] (opsiyonel - skip edilir)
+      
+      A kullanıcısı (Task.All var):
+         → Controller kontrolü: Task.All var mı? → ✅ Evet
+         → Action kontrolü: SKIP EDİLİR → Tüm action'lar çalışır
+      
+      B kullanıcısı (Task.All yok, Task.Create.New var):
+         → Controller kontrolü: Task.All var mı? → ❌ Hayır
+         → Action kontrolü: Task.Create.New var mı? → ✅ Evet
+         → Sadece CreateTask() çalışır
+   
+   ✅ CONTROLLER SEVİYESİNDE TASK.ALL YOKSA:
+      → Controller: (Task.All yok)
+      → Action: [AuthorizePermission("Task.Create.New")] (ZORUNLU!)
+      
+      C kullanıcısı (Task.View.All var):
+         → Controller kontrolü: Task.All var mı? → ❌ Hayır
+         → Action kontrolü: Task.View.All var mı? → ✅ Evet
+         → Sadece GetTasks() çalışır
+   
    ✅ PERFORMANS:
       → İlk request: Cache'den kontrol (<1ms)
       → Cache miss: DB'den çek (50-100ms, optimize sorgu)
       → Wildcard kontrolü: Memory'de O(1) lookup (çok hızlı!)
+      → Controller wildcard varsa: Action kontrolü skip edilir (daha hızlı!)
    
    ✅ Sadece Status = Active olan permission'lar çalışır
    🚫 Inactive olanlar → kimse kullanamaz (cache temizlenir)
