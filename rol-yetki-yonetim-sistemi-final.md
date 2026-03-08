@@ -1,138 +1,156 @@
-# 🚀 **GÜNCELLENMİŞ ROLE/YETKİ SİSTEMİ (Tüm Özellikler Dahil)**
+# Rol/Yetki Yonetim Sistemi (Guncellenmiş Plan)
 
-## 📋 **GENEL BAKIŞ**
+## 1. GENEL BAKIS
 
-Bu dokümantasyon, Mini Jira projesi için **mevcut yapıyı koruyarak** yeni özellikler eklenmiş güncellenmiş rol/yetki yönetim sistemini açıklar. Sistem, **RBAC (Role-Based Access Control)** ile **Permission-based Authorization'ı** birleştiren hibrit bir yaklaşım kullanır.
+Bu dokumantasyon, Mini Jira projesi icin rol/yetki yonetim sistemini aciklar.
+Sistem, **RBAC (Role-Based Access Control)** ile **Permission-based Authorization**'i birlestiren hibrit bir yaklasim kullanir.
 
-### **🎯 YENİ ÖZELLİKLER:**
+### Temel Prensipler:
 
-1. **✅ A.B.C Formatı:** Permission formatı **3 parça zorunlu** (örn: `Project.Export.PDF`)
-2. **✅ Otomatik Keşif:** Yeni permission'lar otomatik olarak keşfedilir
-3. **✅ Permission Status:** Active, Inactive, Deprecated durum yönetimi
-4. **✅ Admin Onay Mekanizması:** Güvenlik için manuel onay
-5. **✅ Pasifleştirme:** Admin panelinden özellikler kapatılabilir
+1. **Sadece spesifik yetkiler** - Wildcard yok (Project.All, Project.Create.* gibi seyler yok)
+2. **Action seviyesinde kontrol** - Controller seviyesinde AuthorizePermission yok
+3. **A.B.C formati zorunlu** - Her yetki 3 parcadan olusur, istisnasiz
+4. **Otomatik kesif** - Sistem kodu tarar, yeni yetkileri bulur
+5. **Admin onayi** - Kesif edilen yetkiler admin onayi olmadan aktif olmaz
+6. **Her yetki bilincli atanir** - Sessiz yetki genislemesi yok
 
-### **📌 MEVCUT YAPIDAN KALANLAR:**
+### Neden Wildcard Yok?
 
-- ✅ Tüm database tabloları (Users, Roles, Permissions, vb.)
-- ✅ PermissionService yetki kontrol mekanizması
-- ✅ AuthorizePermissionAttribute
-- ✅ RolesController API'leri
-- ✅ React Admin Paneli
-- ✅ Cache mekanizması
+Wildcard (Project.All.All gibi) sorun olusturur:
+
+```
+Bugun PM'e Project.All.All verdin (10 yetki var, hepsi uygun)
+6 ay sonra gelistirici ekledi: Project.Billing.Invoice
+PM bunu da yapabiliyor → Admin haberi bile yok
+```
+
+Bu "sessiz yetki genislemesi" guvenlik acigidir.
+Wildcard'in performans kazanci yok (HashSet.Contains() zaten O(1)).
+RAM farki onemsiz (~4KB vs ~0.5KB per user).
 
 ---
 
-## 📦 **1. DATABASE TABLOLARI (Güncellenmiş)**
+## 2. DATABASE TABLOLARI
 
-### **1.1 Mevcut Tablolar (Aynen Kalacak)**
+### 2.1 Tablolar
 
 ```sql
--- Users Tablosu (MEVCUT - Değişmedi)
+-- Kullanicilar
 Users
 ├── ID (PK)
 ├── Email
-├── Name
-└── ...
+├── PasswordHash
+├── FullName
+├── IsActive
+├── CreatedAt
+└── UpdatedAt
 
--- Roller Tablosu (MEVCUT - Değişmedi)
+-- Roller
 Roles
 ├── ID (PK)
 ├── Name (Admin, ProjectManager, Developer)
 └── Description
 
--- Yetkiler Tablosu (MEVCUT + YENİ ALANLAR)
+-- Yetkiler
 Permissions
 ├── ID (PK)
-├── Name (Project.Export.PDF) -- MEVCUT
-├── Category (Project) -- MEVCUT
-├── Description -- MEVCUT
-├── MainCategory (Project) -- YENİ: İlk parça
-├── SubCategory (Export) -- YENİ: İkinci parça
-├── ActionName (PDF) -- YENİ: Üçüncü parça
-├── Status (Active/Inactive/Deprecated) -- YENİ
-├── CreatedAt -- YENİ
-└── CreatedBy -- YENİ
+├── Name (Project.View.List)     -- Tam yetki adi
+├── MainCategory (Project)       -- Ilk parca (gruplama icin)
+├── SubCategory (View)           -- Ikinci parca (gruplama icin)
+├── ActionName (List)            -- Ucuncu parca
+├── Description
+├── Status (Active/Inactive/Deprecated)
+├── CreatedAt
+└── CreatedBy
 
--- Kullanıcı-Rol İlişkisi (MEVCUT - Değişmedi)
+-- Kullanici-Rol Iliskisi
 UserRoles
 ├── UserID (FK)
 └── RoleID (FK)
 
--- Rol-Yetki İlişkisi (MEVCUT - Değişmedi)
+-- Rol-Yetki Iliskisi
 RolePermissions
 ├── RoleID (FK)
 └── PermissionID (FK)
 
--- Kullanıcı-Direkt Yetki İlişkisi (MEVCUT - Değişmedi)
+-- Kullanici-Direkt Yetki Iliskisi
 UserPermissions
 ├── UserID (FK)
 └── PermissionID (FK)
-```
 
-### **1.2 Yeni Eklenen Tablolar (Discovery için)**
-
-```sql
--- Keşfedilen Permission'lar (YENİ)
+-- Kesfedilen Yetkiler (Onay bekleyenler)
 DiscoveredPermissions
 ├── ID (PK)
-├── Name (A.B.C formatında - ZORUNLU 3 parça!)
-├── MainCategory (Otomatik parse edilir: "Project")
-├── SubCategory (Otomatik parse edilir: "Export")
-├── ActionName (Otomatik parse edilir: "PDF")
+├── Name (A.B.C formatinda)
+├── MainCategory
+├── SubCategory
+├── ActionName
 ├── DiscoveredAt
 ├── DiscoveredBy ("System")
 ├── Status (Pending, Approved, Ignored)
 └── Description
 ```
 
+### 2.2 Gruplama Icin Kullanim
+
+MainCategory ve SubCategory alanlari admin panelde gruplama, filtreleme ve toplu secim icin kullanilir:
+
+```
+Arama:      Name LIKE '%export%'
+Filtreleme: WHERE MainCategory = 'Project' AND SubCategory = 'View'
+Toplu Secim: Bir kategorideki mevcut yetkileri tek tek secer (wildcard degil)
+```
+
+### 2.3 Yetki Atama Yollari
+
+Kullanici yetkiye 2 yoldan ulasir:
+
+```
+Yol 1: Rol uzerinden (dolayli)
+  Kullanici → Rol → Yetkiler
+  Kamil → Admin → [Project.View.List, Task.Create.New, ...]
+
+Yol 2: Direkt yetki atama
+  Kullanici → Yetki (rol araciligi olmadan)
+  Ayse → Project.Export.PDF (sadece bu tek yetki)
+```
+
 ---
 
-## 💻 **2. ENTITY MODELLER (Güncellenmiş)**
+## 3. ENTITY MODELLER
 
-### **2.1 Permission.cs (Ana Yetki - MEVCUT + YENİ ÖZELLİKLER)**
+### 3.1 Permission.cs
 
 ```csharp
 namespace MiniJira.Domain.Entities;
 
 public class Permission
 {
-    // MEVCUT PROPERTIES
     public int Id { get; set; }
-    public string Name { get; set; }           // "Project.Export.PDF"
-    public string Category { get; set; }       // "Project" (MEVCUT)
+    public string Name { get; set; }           // "Project.View.List"
+    public string MainCategory { get; set; }   // "Project"
+    public string SubCategory { get; set; }    // "View"
+    public string ActionName { get; set; }     // "List"
     public string Description { get; set; }
-    
-    // YENİ: A.B.C formatı için parse edilmiş alanlar
-    public string MainCategory { get; set; }   // "Project" (ilk parça)
-    public string SubCategory { get; set; }    // "Export" (ikinci parça)
-    public string ActionName { get; set; }     // "PDF" (üçüncü parça)
-    
-    // YENİ: Permission durumu (Active/Inactive)
     public PermissionStatus Status { get; set; } = PermissionStatus.Active;
-    
-    // YENİ: Oluşturulma bilgileri
     public DateTime CreatedAt { get; set; }
     public string CreatedBy { get; set; }
-    
-    // MEVCUT NAVIGATION (Değişmedi)
+
     public virtual ICollection<Role> Roles { get; set; } = new List<Role>();
     public virtual ICollection<User> DirectUsers { get; set; } = new List<User>();
-    
-    // YENİ: Helper property
+
     public bool IsActive => Status == PermissionStatus.Active;
 }
 
-// YENİ: Permission durum enum'u
 public enum PermissionStatus
 {
-    Active,     // Aktif, kullanılabilir
-    Inactive,   // Pasif, kimse kullanamaz
-    Deprecated  // Artık koddan kaldırıldı
+    Active,     // Aktif, kullanilabilir
+    Inactive,   // Pasif, kimse kullanamaz (gecici kapatma)
+    Deprecated  // Koddan kaldirildi
 }
 ```
 
-### **2.2 DiscoveredPermission.cs (YENİ - Keşif Tablosu)**
+### 3.2 DiscoveredPermission.cs
 
 ```csharp
 namespace MiniJira.Domain.Entities;
@@ -140,411 +158,74 @@ namespace MiniJira.Domain.Entities;
 public class DiscoveredPermission
 {
     public int Id { get; set; }
-    
-    // A.B.C formatında - ZORUNLU 3 parça!
-    public string Name { get; set; }           // "Project.Export.PDF"
-    
-    // Otomatik parse edilmiş alanlar
+    public string Name { get; set; }           // "Project.Archive.Old"
     public string MainCategory { get; set; }   // "Project"
-    public string SubCategory { get; set; }    // "Export"
-    public string ActionName { get; set; }     // "PDF"
-    
+    public string SubCategory { get; set; }    // "Archive"
+    public string ActionName { get; set; }     // "Old"
     public DateTime DiscoveredAt { get; set; }
     public string DiscoveredBy { get; set; }   // "System"
-    
-    // Keşif durumu
     public DiscoveryStatus Status { get; set; } = DiscoveryStatus.Pending;
-    
     public string Description { get; set; }
 }
 
-// YENİ: Keşif durum enum'u
 public enum DiscoveryStatus
 {
-    Pending,    // Admin onayı bekliyor
-    Approved,   // Onaylandı, Permission'a eklendi
+    Pending,    // Admin onayi bekliyor
+    Approved,   // Onaylandi, Permissions tablosuna eklendi
     Ignored     // Reddedildi
 }
 ```
 
-### **2.3 User.cs ve Role.cs (MEVCUT - Değişmedi)**
+### 3.3 User.cs ve Role.cs
 
 ```csharp
 namespace MiniJira.Domain.Entities;
 
-// User.cs (MEVCUT - aynen kalıyor)
 public class User : IdentityUser
 {
     public string FullName { get; set; }
-    
-    // MEVCUT: Kullanıcının rolleri
     public virtual ICollection<Role> Roles { get; set; } = new List<Role>();
-    
-    // MEVCUT: Direkt yetkileri
     public virtual ICollection<Permission> DirectPermissions { get; set; } = new List<Permission>();
 }
 
-// Role.cs (MEVCUT - aynen kalıyor)
 public class Role
 {
     public int Id { get; set; }
     public string Name { get; set; }           // "Admin", "ProjectManager", "Developer"
     public string Description { get; set; }
-    
-    // MEVCUT: Rollerin yetkileri
     public virtual ICollection<Permission> Permissions { get; set; } = new List<Permission>();
-    
-    // MEVCUT: Kullanıcılar
     public virtual ICollection<User> Users { get; set; } = new List<User>();
 }
 ```
 
 ---
 
-## 🔧 **3. PERMISSION REGISTRY SERVICE (YENİ)**
+## 4. AUTHORIZE PERMISSION ATTRIBUTE
 
-### **3.1 IPermissionRegistry Interface**
-
-```csharp
-namespace MiniJira.Application.Services;
-
-// YENİ INTERFACE
-public interface IPermissionRegistry
-{
-    // YENİ: Kod tarama ve keşif
-    Task<List<DiscoveredPermission>> DiscoverNewPermissionsAsync();
-    Task<Permission> ApprovePermissionAsync(int discoveredPermissionId, string approvedBy);
-    Task IgnorePermissionAsync(int discoveredPermissionId, string ignoredBy);
-    
-    // YENİ: Permission durum yönetimi
-    Task UpdatePermissionStatusAsync(int permissionId, PermissionStatus status, string reason, string updatedBy);
-    
-    // YENİ: Permission parse etme
-    (string Main, string Sub, string Action) ParsePermissionName(string permissionName);
-}
-```
-
-### **3.2 PermissionRegistry Implementation**
+### 4.1 AuthorizePermissionAttribute
 
 ```csharp
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
-using Microsoft.Extensions.Logging;
-using MiniJira.Application.Services;
-using MiniJira.Domain.Entities;
-using MiniJira.Domain.Enums;
-using MiniJira.Domain.Exceptions;
-using MiniJira.Infrastructure.Data;
-using System.Reflection;
-
-namespace MiniJira.Infrastructure.Services;
-
-public class PermissionRegistry : IPermissionRegistry
-{
-    private readonly AppDbContext _db;
-    private readonly IMemoryCache _cache;
-    private readonly ILogger<PermissionRegistry> _logger;
-    
-    public PermissionRegistry(
-        AppDbContext db, 
-        IMemoryCache cache,
-        ILogger<PermissionRegistry> logger)
-    {
-        _db = db;
-        _cache = cache;
-        _logger = logger;
-    }
-    
-    // YENİ: Permission parse etme (ZORUNLU 3 parça!)
-    public (string Main, string Sub, string Action) ParsePermissionName(string permissionName)
-    {
-        var parts = permissionName.Split('.');
-        
-        // ZORUNLU: 3 parça olmalı!
-        if (parts.Length != 3)
-        {
-            throw new InvalidPermissionFormatException(
-                $"Permission '{permissionName}' must be in A.B.C format. " +
-                $"Example: 'Project.Export.PDF'. Found {parts.Length} parts.");
-        }
-        
-        // Parçalar boş olmamalı
-        if (string.IsNullOrWhiteSpace(parts[0]) || 
-            string.IsNullOrWhiteSpace(parts[1]) || 
-            string.IsNullOrWhiteSpace(parts[2]))
-        {
-            throw new InvalidPermissionFormatException(
-                "Permission parts cannot be empty. Format: A.B.C");
-        }
-        
-        return (parts[0].Trim(), parts[1].Trim(), parts[2].Trim());
-    }
-    
-    // YENİ: Kod tarama ve yeni permission'ları keşfet
-    public async Task<List<DiscoveredPermission>> DiscoverNewPermissionsAsync()
-    {
-        _logger.LogInformation("Starting permission discovery...");
-        
-        // 1. Koddaki tüm [AuthorizePermission] attribute'larını bul
-        var permissionsInCode = await ScanCodeForPermissionsAsync();
-        
-        // 2. DB'deki mevcut permission'ları getir
-        var existingPermissions = await _db.Permissions
-            .Select(p => p.Name)
-            .ToListAsync();
-            
-        // 3. Yeni olanları bul
-        var newPermissions = permissionsInCode
-            .Except(existingPermissions)
-            .ToList();
-            
-        // 4. Daha önce keşfedilmemiş olanları bul
-        var existingDiscoveries = await _db.DiscoveredPermissions
-            .Select(d => d.Name)
-            .ToListAsync();
-            
-        var trulyNew = newPermissions
-            .Except(existingDiscoveries)
-            .ToList();
-            
-        // 5. Parse et ve kaydet
-        var discoveries = new List<DiscoveredPermission>();
-        
-        foreach (var permName in trulyNew)
-        {
-            try
-            {
-                // Parse et (3 parça kontrolü yapar)
-                var (main, sub, action) = ParsePermissionName(permName);
-                
-                var discovery = new DiscoveredPermission
-                {
-                    Name = permName,
-                    MainCategory = main,
-                    SubCategory = sub,
-                    ActionName = action,
-                    DiscoveredAt = DateTime.UtcNow,
-                    DiscoveredBy = "System",
-                    Status = DiscoveryStatus.Pending,
-                    Description = $"Discovered from code at {DateTime.UtcNow}"
-                };
-                
-                discoveries.Add(discovery);
-            }
-            catch (InvalidPermissionFormatException ex)
-            {
-                _logger.LogWarning(ex, $"Skipping invalid permission format: {permName}");
-                // Hatalı formatı logla ama sistemi durdurma
-            }
-        }
-        
-        if (discoveries.Any())
-        {
-            await _db.DiscoveredPermissions.AddRangeAsync(discoveries);
-            await _db.SaveChangesAsync();
-            _logger.LogInformation($"Added {discoveries.Count} new permissions to discovery table");
-        }
-        
-        return discoveries;
-    }
-    
-    // YENİ: Keşfedilen permission'ı onayla
-    public async Task<Permission> ApprovePermissionAsync(int discoveredPermissionId, string approvedBy)
-    {
-        var discovery = await _db.DiscoveredPermissions
-            .FirstOrDefaultAsync(d => d.Id == discoveredPermissionId && 
-                                    d.Status == DiscoveryStatus.Pending);
-        
-        if (discovery == null)
-            throw new NotFoundException("Pending permission not found");
-        
-        // Permission oluştur
-        var permission = new Permission
-        {
-            Name = discovery.Name,
-            MainCategory = discovery.MainCategory,
-            SubCategory = discovery.SubCategory,
-            ActionName = discovery.ActionName,
-            Category = discovery.MainCategory, // Ana kategoriyi Category olarak da kaydet
-            Description = $"Approved from discovery by {approvedBy} at {DateTime.UtcNow}",
-            CreatedAt = DateTime.UtcNow,
-            CreatedBy = approvedBy,
-            Status = PermissionStatus.Active
-        };
-        
-        // Kaydet
-        await _db.Permissions.AddAsync(permission);
-        discovery.Status = DiscoveryStatus.Approved;
-        await _db.SaveChangesAsync();
-        
-        // Cache temizle
-        await ClearPermissionCacheAsync(permission.Name);
-        
-        _logger.LogInformation($"Permission approved: {permission.Name} by {approvedBy}");
-        
-        return permission;
-    }
-    
-    // YENİ: Permission'ı ignore et
-    public async Task IgnorePermissionAsync(int discoveredPermissionId, string ignoredBy)
-    {
-        var discovery = await _db.DiscoveredPermissions
-            .FirstOrDefaultAsync(d => d.Id == discoveredPermissionId && 
-                                    d.Status == DiscoveryStatus.Pending);
-        
-        if (discovery == null)
-            throw new NotFoundException("Pending permission not found");
-        
-        discovery.Status = DiscoveryStatus.Ignored;
-        discovery.Description += $"\n[IGNORED] by {ignoredBy} at {DateTime.UtcNow}";
-        
-        await _db.SaveChangesAsync();
-        
-        _logger.LogInformation($"Permission ignored: {discovery.Name} by {ignoredBy}");
-    }
-    
-    // YENİ: Permission durumunu güncelle (Active/Inactive)
-    public async Task UpdatePermissionStatusAsync(
-        int permissionId, 
-        PermissionStatus status, 
-        string reason, 
-        string updatedBy)
-    {
-        var permission = await _db.Permissions.FindAsync(permissionId);
-        
-        if (permission == null)
-            throw new NotFoundException("Permission not found");
-        
-        var oldStatus = permission.Status;
-        permission.Status = status;
-        
-        // Pasifleştirme sebebini kaydet
-        if (status == PermissionStatus.Inactive)
-        {
-            permission.Description += $"\n[DEACTIVATED] {reason} by {updatedBy} at {DateTime.UtcNow}";
-        }
-        else if (status == PermissionStatus.Active && oldStatus == PermissionStatus.Inactive)
-        {
-            permission.Description += $"\n[REACTIVATED] by {updatedBy} at {DateTime.UtcNow}";
-        }
-        
-        await _db.SaveChangesAsync();
-        
-        // Cache temizle
-        await ClearPermissionCacheAsync(permission.Name);
-        
-        _logger.LogInformation(
-            $"Permission {permission.Name} status changed from {oldStatus} to {status} by {updatedBy}");
-    }
-    
-    // YENİ: Permission cache'ini temizle
-    private async Task ClearPermissionCacheAsync(string permissionName)
-    {
-        // Bu permission'a sahip tüm kullanıcıların cache'ini temizle
-        var usersWithPermission = await _db.Users
-            .Where(u => u.Roles.Any(r => r.Permissions.Any(p => p.Name == permissionName)) ||
-                       u.DirectPermissions.Any(p => p.Name == permissionName))
-            .Select(u => u.Id)
-            .ToListAsync();
-        
-        foreach (var userId in usersWithPermission)
-        {
-            var cacheKey = $"permission:{userId}:{permissionName}";
-            _cache.Remove(cacheKey);
-            
-            // User permissions cache'ini de temizle
-            var userPermissionsKey = $"userpermissions:{userId}";
-            _cache.Remove(userPermissionsKey);
-        }
-    }
-    
-    // MEVCUT: Kodu tarama methodu (private helper)
-    private async Task<List<string>> ScanCodeForPermissionsAsync()
-    {
-        var permissions = new List<string>();
-        
-        var assembly = Assembly.GetExecutingAssembly();
-        var controllerTypes = assembly.GetTypes()
-            .Where(t => typeof(ControllerBase).IsAssignableFrom(t))
-            .ToList();
-        
-        foreach (var controllerType in controllerTypes)
-        {
-            var methods = controllerType.GetMethods(
-                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-            
-            foreach (var method in methods)
-            {
-                var permissionAttributes = method.GetCustomAttributes<AuthorizePermissionAttribute>(true);
-                
-                foreach (var attr in permissionAttributes)
-                {
-                    if (!string.IsNullOrEmpty(attr.Name))
-                    {
-                        permissions.Add(attr.Name);
-                    }
-                }
-            }
-        }
-        
-        return permissions.Distinct().ToList();
-    }
-}
-```
-
-### **3.3 Custom Exceptions**
-
-```csharp
-namespace MiniJira.Domain.Exceptions;
-
-public class InvalidPermissionFormatException : Exception
-{
-    public InvalidPermissionFormatException(string message) : base(message) { }
-}
-
-public class NotFoundException : Exception
-{
-    public NotFoundException(string message) : base(message) { }
-}
-```
-
----
-
-## 🛡️ **4. AUTHORIZE PERMISSION ATTRIBUTE (Güncellenmiş)**
-
-### **4.1 AuthorizePermissionAttribute**
-
-```csharp
-using System;
-
 namespace MiniJira.WebAPI.Attributes;
 
-// WebAPI/Attributes/AuthorizePermissionAttribute.cs
-[AttributeUsage(AttributeTargets.Method | AttributeTargets.Class, AllowMultiple = true)]
-public class AuthorizePermissionAttribute : AuthorizeAttribute
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = true)]
+public class AuthorizePermissionAttribute : Attribute
 {
     public string Name { get; }
-    
-    /// <summary>
-    /// ZORUNLU: A.B.C formatında permission adı
-    /// Örnek: "Project.Export.PDF", "Task.Comments.Add"
-    /// </summary>
+
     public AuthorizePermissionAttribute(string name)
     {
         Name = name;
-        
-        // Runtime'dan önce basit format kontrolü
+
         var parts = name.Split('.');
         if (parts.Length != 3)
         {
             throw new ArgumentException(
                 $"Permission name must be in A.B.C format (3 parts). " +
-                $"Example: 'Project.Export.PDF'. Given: '{name}'");
+                $"Example: 'Project.View.List'. Given: '{name}'");
         }
-        
-        // Parçalar boş olmamalı
-        if (string.IsNullOrWhiteSpace(parts[0]) || 
-            string.IsNullOrWhiteSpace(parts[1]) || 
+
+        if (string.IsNullOrWhiteSpace(parts[0]) ||
+            string.IsNullOrWhiteSpace(parts[1]) ||
             string.IsNullOrWhiteSpace(parts[2]))
         {
             throw new ArgumentException(
@@ -554,88 +235,45 @@ public class AuthorizePermissionAttribute : AuthorizeAttribute
 }
 ```
 
-### **4.2 AuthorizePermissionFilter (Güncellenmiş - Akıllı Controller Kontrolü)**
+**Not:** `AttributeTargets.Method` — sadece action seviyesinde kullanilabilir, controller seviyesinde kullanilamaz.
+
+### 4.2 AuthorizePermissionFilter
 
 ```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Mvc.Controllers;
-using Microsoft.AspNetCore.Mvc.Filters;
-using Microsoft.Extensions.DependencyInjection;
-using MiniJira.Application.Services;
-using MiniJira.WebAPI.Attributes;
-using System.Linq;
-using System.Security.Claims;
-
 namespace MiniJira.WebAPI.Filters;
 
-// WebAPI/Filters/AuthorizePermissionFilter.cs (Güncellenmiş - Akıllı kontrol)
 public class AuthorizePermissionFilter : IAuthorizationFilter
 {
     private readonly string _permission;
-    
+
     public AuthorizePermissionFilter(string permission)
     {
         _permission = permission;
     }
-    
+
     public void OnAuthorization(AuthorizationFilterContext context)
     {
-        // 1. Kullanıcı giriş yapmış mı?
         if (!context.HttpContext.User.Identity.IsAuthenticated)
         {
             context.Result = new UnauthorizedResult();
             return;
         }
-        
+
         var userIdClaim = context.HttpContext.User.FindFirstValue(ClaimTypes.NameIdentifier);
-        
+
         if (string.IsNullOrEmpty(userIdClaim) || !int.TryParse(userIdClaim, out int userId))
         {
             context.Result = new UnauthorizedResult();
             return;
         }
-        
+
         var permissionService = context.HttpContext.RequestServices
             .GetRequiredService<IPermissionService>();
-        
-        // ✅ 2. AKILLI KONTROL: Controller seviyesinde wildcard permission var mı?
-        var controllerDescriptor = context.ActionDescriptor as ControllerActionDescriptor;
-        if (controllerDescriptor != null)
-        {
-            // Controller attribute'larını kontrol et
-            var controllerAttributes = controllerDescriptor.ControllerTypeInfo
-                .GetCustomAttributes<AuthorizePermissionAttribute>(true);
-            
-            foreach (var controllerAttr in controllerAttributes)
-            {
-                // ✅ Controller'da wildcard permission var mı? (örn: Task.All)
-                var parts = _permission.Split('.');
-                if (parts.Length >= 1)
-                {
-                    var wildcardPermission = $"{parts[0]}.All";  // "Task.All"
-                    
-                    // Controller'da wildcard permission varsa kontrol et
-                    if (controllerAttr.Name == wildcardPermission)
-                    {
-                        // ✅ Kullanıcıda wildcard permission var mı? (Task.All)
-                        var hasWildcard = permissionService
-                            .HasPermissionAsync(userId, wildcardPermission).GetAwaiter().GetResult();
-                        
-                        if (hasWildcard)
-                        {
-                            // ✅ Wildcard varsa → Action kontrolünü SKIP ET, direkt geç!
-                            return; // Authorization başarılı
-                        }
-                    }
-                }
-            }
-        }
-        
-        // ✅ 3. Wildcard yoksa → Normal action kontrolü yap
+
         var hasPermission = permissionService
-            .HasPermissionAsync(userId, _permission).GetAwaiter().GetResult();
-        
+            .HasPermissionAsync(userId, _permission)
+            .GetAwaiter().GetResult();
+
         if (!hasPermission)
         {
             context.Result = new ForbidResult();
@@ -646,9 +284,67 @@ public class AuthorizePermissionFilter : IAuthorizationFilter
 
 ---
 
-## ⚡ **5. PERMISSION SERVICE (Güncellenmiş - Optimize Cache + Wildcard Kontrolü)**
+## 5. PERMISSION SERVICE
 
-### **5.1 IPermissionService Interface (Güncellenmiş)**
+### 5.1 IPermissionCache Interface (Redis Abstraction)
+
+```csharp
+namespace MiniJira.Application.Services;
+
+public interface IPermissionCache
+{
+    Task<HashSet<string>> GetAsync(int userId);
+    Task SetAsync(int userId, HashSet<string> permissions);
+    Task RemoveAsync(int userId);
+}
+```
+
+### 5.2 RedisPermissionCache Implementation
+
+```csharp
+using System.Text.Json;
+using Microsoft.Extensions.Caching.Distributed;
+
+namespace MiniJira.Infrastructure.Services;
+
+public class RedisPermissionCache : IPermissionCache
+{
+    private readonly IDistributedCache _cache;
+    private readonly DistributedCacheEntryOptions _cacheOptions;
+
+    public RedisPermissionCache(IDistributedCache cache)
+    {
+        _cache = cache;
+        _cacheOptions = new DistributedCacheEntryOptions
+        {
+            AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15)
+        };
+    }
+
+    public async Task<HashSet<string>> GetAsync(int userId)
+    {
+        var json = await _cache.GetStringAsync($"userpermissions:{userId}");
+
+        if (json == null)
+            return null;
+
+        return JsonSerializer.Deserialize<HashSet<string>>(json);
+    }
+
+    public async Task SetAsync(int userId, HashSet<string> permissions)
+    {
+        var json = JsonSerializer.Serialize(permissions);
+        await _cache.SetStringAsync($"userpermissions:{userId}", json, _cacheOptions);
+    }
+
+    public async Task RemoveAsync(int userId)
+    {
+        await _cache.RemoveAsync($"userpermissions:{userId}");
+    }
+}
+```
+
+### 5.3 IPermissionService Interface
 
 ```csharp
 namespace MiniJira.Application.Services;
@@ -659,292 +355,456 @@ public interface IPermissionService
     Task<List<string>> GetUserPermissionsAsync(int userId);
     Task<bool> IsInRoleAsync(int userId, string roleName);
     Task<List<string>> GetUserRolesAsync(int userId);
-    
-    // ✅ YENİ: Cache invalidation
-    void InvalidateUserCache(int userId);
+    Task InvalidateUserCacheAsync(int userId);
 }
 ```
 
-### **5.2 PermissionService Implementation (OPTİMİZE EDİLMİŞ)**
+### 5.4 PermissionService Implementation
 
 ```csharp
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
-using MiniJira.Application.Services;
-using MiniJira.Domain.Entities;
-using MiniJira.Domain.Enums;
-using MiniJira.Infrastructure.Data;
-
 namespace MiniJira.Infrastructure.Services;
 
 public class PermissionService : IPermissionService
 {
     private readonly AppDbContext _db;
-    private readonly IMemoryCache _cache;
-    
-    public PermissionService(AppDbContext db, IMemoryCache cache)
+    private readonly IPermissionCache _cache;
+
+    public PermissionService(AppDbContext db, IPermissionCache cache)
     {
         _db = db;
         _cache = cache;
     }
-    
-    /// <summary>
-    /// ✅ OPTİMİZE: User bazında tüm permission'ları tek seferde cache'le
-    /// ✅ WILDCARD: Project.All → Project.Create.New'i kapsar
-    /// </summary>
+
     public async Task<bool> HasPermissionAsync(int userId, string permissionName)
     {
-        // ✅ 1. ÖNCE CACHE'DEN KONTROL ET (User bazında tek key!)
-        var cacheKey = $"userpermissions:{userId}";
-        
-        if (!_cache.TryGetValue(cacheKey, out HashSet<string> userPermissions))
+        var userPermissions = await _cache.GetAsync(userId);
+
+        if (userPermissions == null)
         {
-            // ✅ 2. CACHE'DE YOKSA → DB'den çek (optimize sorgu - sadece name'ler!)
             userPermissions = await GetUserPermissionsFromDbAsync(userId);
-            
-            // ✅ 3. CACHE'LE (15 dakika)
-            _cache.Set(cacheKey, userPermissions, TimeSpan.FromMinutes(15));
+            await _cache.SetAsync(userId, userPermissions);
         }
-        
-        // ✅ 4. WILDCARD KONTROLÜ (Memory'de, çok hızlı - O(1))
-        return CheckWildcardPermission(userPermissions, permissionName);
+
+        return userPermissions.Contains(permissionName);
     }
-    
-    /// <summary>
-    /// ✅ OPTİMİZE DB SORGUSU: Sadece permission name'lerini çek (Include yok!)
-    /// 100 permission = ~2KB veri (eski: ~50-100KB entity'ler)
-    /// </summary>
+
     private async Task<HashSet<string>> GetUserPermissionsFromDbAsync(int userId)
     {
-        // ✅ Role-based permissions (sadece name - projection + status kontrolü!)
-        var activeRolePermissions = await _db.UserRoles
+        // Rol uzerinden gelen yetkiler (sadece name, sadece Active)
+        var rolePermissions = await _db.UserRoles
             .Where(ur => ur.UserId == userId)
             .SelectMany(ur => ur.Role.RolePermissions)
             .Where(rp => rp.Permission.Status == PermissionStatus.Active)
             .Select(rp => rp.Permission.Name)
-            .Where(name => name != null)
             .Distinct()
             .ToListAsync();
-        
-        // ✅ Direct permissions (sadece name - projection + status kontrolü!)
-        var activeDirectPermissions = await _db.UserPermissions
+
+        // Direkt atanmis yetkiler (sadece name, sadece Active)
+        var directPermissions = await _db.UserPermissions
             .Where(up => up.UserId == userId)
             .Where(up => up.Permission.Status == PermissionStatus.Active)
             .Select(up => up.Permission.Name)
-            .Where(name => name != null)
             .Distinct()
             .ToListAsync();
-        
-        // ✅ HashSet'e çevir (O(1) lookup için)
-        var allPermissions = new HashSet<string>(activeRolePermissions);
-        allPermissions.UnionWith(activeDirectPermissions);
-        
+
+        var allPermissions = new HashSet<string>(rolePermissions);
+        allPermissions.UnionWith(directPermissions);
+
         return allPermissions;
     }
-    
-    /// <summary>
-    /// ✅ WILDCARD KONTROLÜ: Project.All → Project.Create.New'i kapsar
-    /// Öncelik sırası: En genelden en spesifike (Project.All varsa direkt dön, arama yapma!)
-    /// </summary>
-    private bool CheckWildcardPermission(HashSet<string> userPermissions, string requestedPermission)
-    {
-        // ✅ 1. Direkt eşleşme var mı?
-        if (userPermissions.Contains(requestedPermission))
-            return true;
-        
-        var parts = requestedPermission.Split('.');
-        if (parts.Length < 3) return false; // A.B.C formatı kontrolü
-        
-        // ✅ 2. En genel: Project.All → Tüm Project işlemlerini kapsar
-        // Project.All varsa → Direkt true dön, arama yapma!
-        if (userPermissions.Contains($"{parts[0]}.All"))
-            return true;
-        
-        // ✅ 3. Orta seviye: Project.Create.* → Tüm Create işlemlerini kapsar
-        if (userPermissions.Contains($"{parts[0]}.{parts[1]}.*"))
-            return true;
-        
-        // ✅ 4. Wildcard yoksa → false (spesifik permission yok)
-        return false;
-    }
-    
+
     public async Task<List<string>> GetUserPermissionsAsync(int userId)
     {
-        // ✅ Cache'den al (eğer yoksa DB'den çek)
-        var cacheKey = $"userpermissions:{userId}";
-        
-        if (!_cache.TryGetValue(cacheKey, out HashSet<string> userPermissions))
+        var userPermissions = await _cache.GetAsync(userId);
+
+        if (userPermissions == null)
         {
             userPermissions = await GetUserPermissionsFromDbAsync(userId);
-            _cache.Set(cacheKey, userPermissions, TimeSpan.FromMinutes(15));
+            await _cache.SetAsync(userId, userPermissions);
         }
-        
+
         return userPermissions.ToList();
     }
-    
+
     public async Task<bool> IsInRoleAsync(int userId, string roleName)
     {
-        // ✅ Optimize: Sadece role name kontrolü (Include yok!)
-        var hasRole = await _db.UserRoles
+        return await _db.UserRoles
             .Where(ur => ur.UserId == userId)
             .AnyAsync(ur => ur.Role.Name == roleName);
-        
-        return hasRole;
     }
-    
+
     public async Task<List<string>> GetUserRolesAsync(int userId)
     {
-        // ✅ Optimize: Sadece role name'leri çek (Include yok!)
-        var roles = await _db.UserRoles
+        return await _db.UserRoles
             .Where(ur => ur.UserId == userId)
             .Select(ur => ur.Role.Name)
             .ToListAsync();
-        
-        return roles;
     }
-    
-    /// <summary>
-    /// ✅ Cache invalidation: Rol/permission değişikliğinde cache'i temizle
-    /// </summary>
-    public void InvalidateUserCache(int userId)
+
+    public async Task InvalidateUserCacheAsync(int userId)
     {
-        var cacheKey = $"userpermissions:{userId}";
-        _cache.Remove(cacheKey);
+        await _cache.RemoveAsync(userId);
+    }
+}
+```
+
+### 5.5 Performans Detaylari
+
+```
+DB Sorgusu: Sadece permission name'leri cekilir (Include yok, projection)
+  Eski: ~50-100KB (tum entity'ler)
+  Yeni: ~2KB (sadece string listesi)
+
+Cache: Redis, user bazinda tek key
+  Key: "userpermissions:{userId}"
+  Value: JSON string (HashSet<string> serialize edilmis)
+  Sure: 15 dakika
+  Kontrol: Deserialize → HashSet.Contains() → O(1)
+
+Redis Avantajlari:
+  - Uygulama RAM'ini kullanmaz (Redis kendi sunucusunda)
+  - Birden fazla servis ayni cache'i paylasir
+  - Uygulama yeniden baslatilsa bile cache kaybolmaz
+  - Asama 2'ye geciste hazir (tum servisler ayni Redis'e bakar)
+```
+
+---
+
+## 6. PERMISSION REGISTRY SERVICE (Otomatik Kesif)
+
+### 6.1 IPermissionRegistry Interface
+
+```csharp
+namespace MiniJira.Application.Services;
+
+public interface IPermissionRegistry
+{
+    Task<List<DiscoveredPermission>> DiscoverNewPermissionsAsync();
+    Task<Permission> ApprovePermissionAsync(int discoveredPermissionId, string approvedBy, List<int> roleIds);
+    Task IgnorePermissionAsync(int discoveredPermissionId, string ignoredBy);
+    Task UpdatePermissionStatusAsync(int permissionId, PermissionStatus status, string reason, string updatedBy);
+    (string Main, string Sub, string Action) ParsePermissionName(string permissionName);
+}
+```
+
+### 6.2 PermissionRegistry Implementation
+
+```csharp
+namespace MiniJira.Infrastructure.Services;
+
+public class PermissionRegistry : IPermissionRegistry
+{
+    private readonly AppDbContext _db;
+    private readonly IPermissionCache _cache;
+    private readonly ILogger<PermissionRegistry> _logger;
+
+    public PermissionRegistry(AppDbContext db, IPermissionCache cache, ILogger<PermissionRegistry> logger)
+    {
+        _db = db;
+        _cache = cache;
+        _logger = logger;
+    }
+
+    public (string Main, string Sub, string Action) ParsePermissionName(string permissionName)
+    {
+        var parts = permissionName.Split('.');
+
+        if (parts.Length != 3)
+        {
+            throw new InvalidPermissionFormatException(
+                $"Permission '{permissionName}' must be in A.B.C format. " +
+                $"Example: 'Project.View.List'. Found {parts.Length} parts.");
+        }
+
+        if (string.IsNullOrWhiteSpace(parts[0]) ||
+            string.IsNullOrWhiteSpace(parts[1]) ||
+            string.IsNullOrWhiteSpace(parts[2]))
+        {
+            throw new InvalidPermissionFormatException(
+                "Permission parts cannot be empty. Format: A.B.C");
+        }
+
+        return (parts[0].Trim(), parts[1].Trim(), parts[2].Trim());
+    }
+
+    public async Task<List<DiscoveredPermission>> DiscoverNewPermissionsAsync()
+    {
+        _logger.LogInformation("Starting permission discovery...");
+
+        // 1. Koddaki tum [AuthorizePermission] attribute'larini bul
+        var permissionsInCode = ScanCodeForPermissions();
+
+        // 2. DB'deki mevcut permission'lari getir
+        var existingPermissions = await _db.Permissions
+            .Select(p => p.Name)
+            .ToListAsync();
+
+        // 3. Daha once kesfedilmis olanlari getir
+        var existingDiscoveries = await _db.DiscoveredPermissions
+            .Select(d => d.Name)
+            .ToListAsync();
+
+        // 4. Gercekten yeni olanlari bul
+        var trulyNew = permissionsInCode
+            .Except(existingPermissions)
+            .Except(existingDiscoveries)
+            .ToList();
+
+        // 5. Parse et ve kaydet
+        var discoveries = new List<DiscoveredPermission>();
+
+        foreach (var permName in trulyNew)
+        {
+            try
+            {
+                var (main, sub, action) = ParsePermissionName(permName);
+
+                discoveries.Add(new DiscoveredPermission
+                {
+                    Name = permName,
+                    MainCategory = main,
+                    SubCategory = sub,
+                    ActionName = action,
+                    DiscoveredAt = DateTime.UtcNow,
+                    DiscoveredBy = "System",
+                    Status = DiscoveryStatus.Pending,
+                    Description = $"Discovered from code at {DateTime.UtcNow}"
+                });
+            }
+            catch (InvalidPermissionFormatException ex)
+            {
+                _logger.LogWarning(ex, $"Skipping invalid permission format: {permName}");
+            }
+        }
+
+        if (discoveries.Any())
+        {
+            await _db.DiscoveredPermissions.AddRangeAsync(discoveries);
+            await _db.SaveChangesAsync();
+            _logger.LogInformation($"Discovered {discoveries.Count} new permissions");
+        }
+
+        return discoveries;
+    }
+
+    // Onaylama + Rol atama tek adimda
+    public async Task<Permission> ApprovePermissionAsync(
+        int discoveredPermissionId, string approvedBy, List<int> roleIds)
+    {
+        var discovery = await _db.DiscoveredPermissions
+            .FirstOrDefaultAsync(d => d.Id == discoveredPermissionId &&
+                                     d.Status == DiscoveryStatus.Pending);
+
+        if (discovery == null)
+            throw new NotFoundException("Pending permission not found");
+
+        // Permission olustur
+        var permission = new Permission
+        {
+            Name = discovery.Name,
+            MainCategory = discovery.MainCategory,
+            SubCategory = discovery.SubCategory,
+            ActionName = discovery.ActionName,
+            Description = $"Approved by {approvedBy} at {DateTime.UtcNow}",
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = approvedBy,
+            Status = PermissionStatus.Active
+        };
+
+        await _db.Permissions.AddAsync(permission);
+        discovery.Status = DiscoveryStatus.Approved;
+
+        // Secilen rollere ata
+        if (roleIds.Any())
+        {
+            var roles = await _db.Roles
+                .Where(r => roleIds.Contains(r.Id))
+                .ToListAsync();
+
+            foreach (var role in roles)
+            {
+                role.Permissions.Add(permission);
+            }
+
+            // Bu rollerdeki kullanicilarin cache'ini temizle
+            var userIds = await _db.UserRoles
+                .Where(ur => roleIds.Contains(ur.RoleId))
+                .Select(ur => ur.UserId)
+                .Distinct()
+                .ToListAsync();
+
+            foreach (var userId in userIds)
+            {
+                await InvalidateUserCacheAsync(userId);
+            }
+        }
+
+        await _db.SaveChangesAsync();
+        _logger.LogInformation($"Permission approved: {permission.Name} by {approvedBy}");
+
+        return permission;
+    }
+
+    public async Task IgnorePermissionAsync(int discoveredPermissionId, string ignoredBy)
+    {
+        var discovery = await _db.DiscoveredPermissions
+            .FirstOrDefaultAsync(d => d.Id == discoveredPermissionId &&
+                                     d.Status == DiscoveryStatus.Pending);
+
+        if (discovery == null)
+            throw new NotFoundException("Pending permission not found");
+
+        discovery.Status = DiscoveryStatus.Ignored;
+        await _db.SaveChangesAsync();
+        _logger.LogInformation($"Permission ignored: {discovery.Name} by {ignoredBy}");
+    }
+
+    public async Task UpdatePermissionStatusAsync(
+        int permissionId, PermissionStatus status, string reason, string updatedBy)
+    {
+        var permission = await _db.Permissions.FindAsync(permissionId);
+
+        if (permission == null)
+            throw new NotFoundException("Permission not found");
+
+        permission.Status = status;
+        await _db.SaveChangesAsync();
+
+        // Bu yetkiye sahip tum kullanicilarin cache'ini temizle
+        var userIds = await _db.Users
+            .Where(u => u.Roles.Any(r => r.Permissions.Any(p => p.Id == permissionId)) ||
+                       u.DirectPermissions.Any(p => p.Id == permissionId))
+            .Select(u => u.Id)
+            .ToListAsync();
+
+        foreach (var userId in userIds)
+        {
+            await InvalidateUserCacheAsync(userId);
+        }
+
+        _logger.LogInformation(
+            $"Permission {permission.Name} status changed to {status} by {updatedBy}");
+    }
+
+    private async Task InvalidateUserCacheAsync(int userId)
+    {
+        await _cache.RemoveAsync(userId);
+    }
+
+    private List<string> ScanCodeForPermissions()
+    {
+        var permissions = new List<string>();
+        var assembly = Assembly.GetExecutingAssembly();
+
+        var controllerTypes = assembly.GetTypes()
+            .Where(t => typeof(ControllerBase).IsAssignableFrom(t));
+
+        foreach (var controllerType in controllerTypes)
+        {
+            var methods = controllerType.GetMethods(
+                BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+
+            foreach (var method in methods)
+            {
+                var attrs = method.GetCustomAttributes<AuthorizePermissionAttribute>(true);
+                foreach (var attr in attrs)
+                {
+                    if (!string.IsNullOrEmpty(attr.Name))
+                        permissions.Add(attr.Name);
+                }
+            }
+        }
+
+        return permissions.Distinct().ToList();
     }
 }
 ```
 
 ---
 
-## 👨‍💼 **6. ADMIN CONTROLLER'LAR (Güncellenmiş)**
+## 7. ADMIN CONTROLLER'LAR
 
-### **6.1 PermissionsController.cs (YENİ - Keşif ve Durum Yönetimi)**
+### 7.1 PermissionsController (Kesif ve Durum Yonetimi)
 
 ```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using MiniJira.Application.Services;
-using MiniJira.Domain.Enums;
-using MiniJira.Domain.Exceptions;
-using MiniJira.Infrastructure.Data;
-using MiniJira.WebAPI.Attributes;
-using System.Security.Claims;
-
 namespace MiniJira.WebAPI.Controllers.Admin;
 
-[Route("api/admin/[controller]")]
+[Route("api/admin/permissions")]
 [ApiController]
-[AuthorizePermission("Admin.Permission.Manage")] // YENİ: Admin özel yetkisi
+[Authorize]
 public class PermissionsController : ControllerBase
 {
     private readonly IPermissionRegistry _permissionRegistry;
     private readonly AppDbContext _db;
-    
+
     public PermissionsController(IPermissionRegistry permissionRegistry, AppDbContext db)
     {
         _permissionRegistry = permissionRegistry;
         _db = db;
     }
-    
+
+    // Yeni yetkileri kesfet
     [HttpGet("discover")]
-    public async Task<IActionResult> GetDiscoveredPermissions()
+    [AuthorizePermission("Admin.Permission.Discover")]
+    public async Task<IActionResult> DiscoverPermissions()
     {
-        // Önce keşif yap
         await _permissionRegistry.DiscoverNewPermissionsAsync();
-        
-        // Bekleyenleri getir
+
         var pending = await _db.DiscoveredPermissions
             .Where(d => d.Status == DiscoveryStatus.Pending)
             .OrderByDescending(d => d.DiscoveredAt)
             .Select(d => new
             {
-                d.Id,
-                d.Name,
-                d.MainCategory,
-                d.SubCategory,
-                d.ActionName,
-                d.DiscoveredAt,
-                d.Description
+                d.Id, d.Name, d.MainCategory, d.SubCategory,
+                d.ActionName, d.DiscoveredAt, d.Description
             })
             .ToListAsync();
-        
+
         return Ok(pending);
     }
-    
+
+    // Onayla + Rollere ata (tek adimda)
     [HttpPost("{id}/approve")]
-    public async Task<IActionResult> ApprovePermission(int id)
+    [AuthorizePermission("Admin.Permission.Approve")]
+    public async Task<IActionResult> ApprovePermission(int id, [FromBody] ApproveRequest request)
     {
         var approvedBy = User.FindFirstValue(ClaimTypes.Name);
-        
-        try
+
+        var permission = await _permissionRegistry
+            .ApprovePermissionAsync(id, approvedBy, request.RoleIds);
+
+        return Ok(new
         {
-            var permission = await _permissionRegistry.ApprovePermissionAsync(id, approvedBy);
-            
-            return Ok(new
-            {
-                Message = $"Permission '{permission.Name}' approved successfully",
-                Permission = new
-                {
-                    permission.Id,
-                    permission.Name,
-                    permission.MainCategory,
-                    permission.SubCategory,
-                    permission.ActionName,
-                    permission.Status
-                }
-            });
-        }
-        catch (NotFoundException ex)
-        {
-            return NotFound(new { Error = ex.Message });
-        }
+            Message = $"Permission '{permission.Name}' approved",
+            Permission = new { permission.Id, permission.Name },
+            AssignedToRoles = request.RoleIds
+        });
     }
-    
+
+    // Reddet
     [HttpPost("{id}/ignore")]
+    [AuthorizePermission("Admin.Permission.Ignore")]
     public async Task<IActionResult> IgnorePermission(int id)
     {
         var ignoredBy = User.FindFirstValue(ClaimTypes.Name);
-        
-        try
-        {
-            await _permissionRegistry.IgnorePermissionAsync(id, ignoredBy);
-            
-            return Ok(new
-            {
-                Message = "Permission ignored successfully"
-            });
-        }
-        catch (NotFoundException ex)
-        {
-            return NotFound(new { Error = ex.Message });
-        }
+        await _permissionRegistry.IgnorePermissionAsync(id, ignoredBy);
+        return Ok(new { Message = "Permission ignored" });
     }
-    
+
+    // Durumu guncelle (Active/Inactive)
     [HttpPut("{id}/status")]
-    public async Task<IActionResult> UpdatePermissionStatus(
-        int id, 
-        [FromBody] UpdateStatusRequest request)
+    [AuthorizePermission("Admin.Permission.Status")]
+    public async Task<IActionResult> UpdateStatus(int id, [FromBody] UpdateStatusRequest request)
     {
         var updatedBy = User.FindFirstValue(ClaimTypes.Name);
-        
-        try
-        {
-            await _permissionRegistry.UpdatePermissionStatusAsync(
-                id, request.Status, request.Reason, updatedBy);
-            
-            return Ok(new
-            {
-                Message = $"Permission status updated to {request.Status}"
-            });
-        }
-        catch (NotFoundException ex)
-        {
-            return NotFound(new { Error = ex.Message });
-        }
+        await _permissionRegistry.UpdatePermissionStatusAsync(
+            id, request.Status, request.Reason, updatedBy);
+        return Ok(new { Message = $"Status updated to {request.Status}" });
     }
-    
+
+    // Tum yetkileri listele (gruplu)
     [HttpGet]
+    [AuthorizePermission("Admin.Permission.View")]
     public async Task<IActionResult> GetAllPermissions()
     {
         var permissions = await _db.Permissions
@@ -953,25 +813,20 @@ public class PermissionsController : ControllerBase
             .ThenBy(p => p.Name)
             .Select(p => new
             {
-                p.Id,
-                p.Name,
-                p.MainCategory,
-                p.SubCategory,
-                p.ActionName,
-                p.Status,
-                p.Description,
-                p.CreatedAt,
-                p.CreatedBy,
-                RoleCount = p.Roles.Count,
-                UserCount = p.DirectUsers.Count
+                p.Id, p.Name, p.MainCategory, p.SubCategory,
+                p.ActionName, p.Status, p.Description
             })
             .ToListAsync();
-        
+
         return Ok(permissions);
     }
 }
 
-// Request DTO
+public class ApproveRequest
+{
+    public List<int> RoleIds { get; set; } = new();
+}
+
 public class UpdateStatusRequest
 {
     public PermissionStatus Status { get; set; }
@@ -979,727 +834,367 @@ public class UpdateStatusRequest
 }
 ```
 
-### **6.2 RolesController.cs (MEVCUT - Aynen Kalıyor, Sadece Ek Endpoint)**
+### 7.2 RolesController (Rol ve Yetki Atama)
 
 ```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using MiniJira.Application.Services;
-using MiniJira.Domain.Enums;
-using MiniJira.Infrastructure.Data;
-using MiniJira.WebAPI.Attributes;
-
 namespace MiniJira.WebAPI.Controllers.Admin;
 
-[Route("api/admin/[controller]")]
-[AuthorizePermission("Admin.Role.Manage")] // MEVCUT
+[Route("api/admin/roles")]
+[ApiController]
+[Authorize]
 public class RolesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IPermissionService _permissionService;
-    
+
     public RolesController(AppDbContext db, IPermissionService permissionService)
     {
         _db = db;
         _permissionService = permissionService;
     }
-    
-    // MEVCUT METHOD'LAR - Hepsi aynen kalıyor:
+
+    // Tum yetkileri getir (rol atama ekrani icin, gruplu)
     [HttpGet("permissions")]
-    public IActionResult GetAllPermissions()
+    [AuthorizePermission("Admin.Role.View")]
+    public async Task<IActionResult> GetAllPermissions()
     {
-        // Sadece Active permission'ları getir
-        var permissions = _db.Permissions
-            .Where(p => p.Status == PermissionStatus.Active) // YENİ: Status kontrolü!
+        var permissions = await _db.Permissions
+            .Where(p => p.Status == PermissionStatus.Active)
+            .OrderBy(p => p.MainCategory)
+            .ThenBy(p => p.SubCategory)
             .Select(p => new
             {
-                p.Id,
-                p.Name,
-                p.MainCategory,
-                p.SubCategory,
-                p.ActionName,
-                p.Category,
-                p.Description
+                p.Id, p.Name, p.MainCategory, p.SubCategory,
+                p.ActionName, p.Description
             })
-            .ToList();
-        
+            .ToListAsync();
+
         return Ok(permissions);
     }
-    
+
+    // Tum rolleri listele
     [HttpGet]
-    public IActionResult GetAllRoles()
+    [AuthorizePermission("Admin.Role.View")]
+    public async Task<IActionResult> GetAllRoles()
     {
-        var roles = _db.Roles
+        var roles = await _db.Roles
             .Include(r => r.Permissions)
             .Select(r => new
             {
-                r.Id,
-                r.Name,
-                r.Description,
+                r.Id, r.Name, r.Description,
                 Permissions = r.Permissions
-                    .Where(p => p.Status == PermissionStatus.Active) // YENİ: Status kontrolü!
+                    .Where(p => p.Status == PermissionStatus.Active)
                     .Select(p => p.Name)
                     .ToList()
             })
-            .ToList();
-        
+            .ToListAsync();
+
         return Ok(roles);
     }
-    
-    [HttpGet("{roleId}")]
-    public IActionResult GetRole(int roleId)
-    {
-        var role = _db.Roles
-            .Include(r => r.Permissions)
-            .FirstOrDefault(r => r.Id == roleId);
-        
-        if (role == null)
-            return NotFound();
-        
-        return Ok(new
-        {
-            role.Id,
-            role.Name,
-            role.Description,
-            Permissions = role.Permissions
-                .Where(p => p.Status == PermissionStatus.Active) // YENİ: Status kontrolü!
-                .Select(p => p.Name)
-                .ToList()
-        });
-    }
-    
+
+    // Rol yetkilerini guncelle
     [HttpPost("{roleId}/permissions")]
+    [AuthorizePermission("Admin.Role.Manage")]
     public async Task<IActionResult> UpdateRolePermissions(
-        int roleId, 
-        [FromBody] List<string> permissionNames)
+        int roleId, [FromBody] List<string> permissionNames)
     {
         var role = await _db.Roles
             .Include(r => r.Permissions)
             .FirstOrDefaultAsync(r => r.Id == roleId);
-        
-        if (role == null)
-            return NotFound();
-        
-        // Sadece Active permission'ları ekle
+
+        if (role == null) return NotFound();
+
+        // Sadece Active yetkileri ata
         var permissions = await _db.Permissions
-            .Where(p => permissionNames.Contains(p.Name) && 
-                       p.Status == PermissionStatus.Active) // YENİ: Status kontrolü!
+            .Where(p => permissionNames.Contains(p.Name) &&
+                       p.Status == PermissionStatus.Active)
             .ToListAsync();
-        
-        // Mevcut yetkileri temizle
+
         role.Permissions.Clear();
-        
-        // Yeni yetkileri ekle
         role.Permissions = permissions;
-        
         await _db.SaveChangesAsync();
-        
-        // ✅ CACHE INVALIDATION: Bu role sahip TÜM kullanıcıların cache'ini temizle
+
+        // Bu role sahip kullanicilarin cache'ini temizle
         var userIds = await _db.UserRoles
             .Where(ur => ur.RoleId == roleId)
             .Select(ur => ur.UserId)
             .ToListAsync();
-        
+
         foreach (var userId in userIds)
         {
-            _permissionService.InvalidateUserCache(userId);
+            await _permissionService.InvalidateUserCacheAsync(userId);
         }
-        
-        return Ok(new { message = "Rol yetkileri güncellendi" });
+
+        return Ok(new { Message = "Rol yetkileri guncellendi" });
     }
-    
+
+    // Kullaniciya rol ata
     [HttpPost("{roleId}/users/{userId}")]
+    [AuthorizePermission("Admin.Role.Assign")]
     public async Task<IActionResult> AssignRoleToUser(int roleId, int userId)
     {
         var role = await _db.Roles.FindAsync(roleId);
-        var user = await _db.Users.FindAsync(userId);
-        
-        if (role == null || user == null)
-            return NotFound();
-        
+        var user = await _db.Users.Include(u => u.Roles).FirstOrDefaultAsync(u => u.Id == userId);
+
+        if (role == null || user == null) return NotFound();
+
         if (!user.Roles.Contains(role))
         {
             user.Roles.Add(role);
             await _db.SaveChangesAsync();
-            
-            // ✅ CACHE INVALIDATION: Kullanıcının cache'ini temizle
-            _permissionService.InvalidateUserCache(userId);
+            await _permissionService.InvalidateUserCacheAsync(userId);
         }
-        
-        return Ok(new { message = "Rol kullanıcıya atandı" });
+
+        return Ok(new { Message = "Rol atandi" });
     }
-    
+
+    // Kullanicidan rol kaldir
     [HttpDelete("{roleId}/users/{userId}")]
+    [AuthorizePermission("Admin.Role.Remove")]
     public async Task<IActionResult> RemoveRoleFromUser(int roleId, int userId)
     {
+        var user = await _db.Users.Include(u => u.Roles).FirstOrDefaultAsync(u => u.Id == userId);
         var role = await _db.Roles.FindAsync(roleId);
-        var user = await _db.Users
-            .Include(u => u.Roles)
-            .FirstOrDefaultAsync(u => u.Id == userId);
-        
-        if (role == null || user == null)
-            return NotFound();
-        
+
+        if (role == null || user == null) return NotFound();
+
         user.Roles.Remove(role);
         await _db.SaveChangesAsync();
-        
-        // ✅ CACHE INVALIDATION: Kullanıcının cache'ini temizle
-        _permissionService.InvalidateUserCache(userId);
-        
-        return Ok(new { message = "Rol kullanıcıdan kaldırıldı" });
-    }
-    
-    // YENİ: Permission status kontrolü ile birlikte rol yetkilerini getir
-    [HttpGet("{roleId}/permissions/active")]
-    public async Task<IActionResult> GetActiveRolePermissions(int roleId)
-    {
-        var role = await _db.Roles
-            .Include(r => r.Permissions)
-            .FirstOrDefaultAsync(r => r.Id == roleId);
-        
-        if (role == null)
-            return NotFound();
-        
-        // YENİ: Sadece aktif permission'ları döndür
-        var activePermissions = role.Permissions
-            .Where(p => p.Status == PermissionStatus.Active)
-            .Select(p => new
-            {
-                p.Id,
-                p.Name,
-                p.MainCategory,
-                p.SubCategory,
-                p.ActionName,
-                p.Description
-            })
-            .ToList();
-        
-        return Ok(new
-        {
-            role.Id,
-            role.Name,
-            role.Description,
-            Permissions = activePermissions
-        });
+        await _permissionService.InvalidateUserCacheAsync(userId);
+
+        return Ok(new { Message = "Rol kaldirildi" });
     }
 }
 ```
 
 ---
 
-## 🎮 **7. CONTROLLER'DA KULLANIM (Wildcard Permission Desteği ile)**
+## 8. CONTROLLER KULLANIM ORNEKLERI (CQRS Ayrimi)
 
-### **7.1 ProjectsController Örneği (Wildcard Permission Desteği)**
+Controller'lar CQRS pattern'ina gore ayrilir. Okuma ve yazma islemleri ayri controller'larda.
+Controller seviyesinde AuthorizePermission YOKTUR. Sadece action seviyesinde kullanilir.
+
+### 8.1 Project Controller'lari
 
 ```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using MiniJira.WebAPI.Attributes;
-
-namespace MiniJira.WebAPI.Controllers;
-
+// Okuma islemleri
 [ApiController]
-[Route("api/[controller]")]
-[Authorize] // Önce login olmalı
-public class ProjectsController : ControllerBase
+[Route("api/projects")]
+[Authorize]
+public class ProjectViewsController : ControllerBase
 {
-    // ✅ WILDCARD PERMISSION ÖRNEKLERİ:
-    // Kullanıcı "Project.All" permission'ına sahipse → Tüm action'lar çalışır!
-    // Kullanıcı "Project.Create.*" permission'ına sahipse → Create action'ları çalışır!
-    
     [HttpGet]
-    [AuthorizePermission("Project.View.All")] 
-    // ✅ Project.All varsa → Çalışır
-    // ✅ Project.View.* varsa → Çalışır
-    // ✅ Project.View.All varsa → Çalışır
-    public IActionResult GetProjects()
-    {
-        return Ok(new { message = "Projeler listelendi" });
-    }
-    
+    [AuthorizePermission("Project.View.List")]
+    public IActionResult GetProjects() { ... }
+
+    [HttpGet("{id}")]
+    [AuthorizePermission("Project.View.Detail")]
+    public IActionResult GetProjectById(int id) { ... }
+
+    [HttpGet("{id}/members")]
+    [AuthorizePermission("Project.View.Members")]
+    public IActionResult GetProjectMembers(int id) { ... }
+
+    [HttpGet("{id}/statistics")]
+    [AuthorizePermission("Project.View.Statistics")]
+    public IActionResult GetProjectStatistics(int id) { ... }
+}
+
+// Yazma islemleri
+[ApiController]
+[Route("api/projects")]
+[Authorize]
+public class ProjectCommandsController : ControllerBase
+{
     [HttpPost]
-    [AuthorizePermission("Project.Create.New")] 
-    // ✅ Project.All varsa → Çalışır (wildcard kontrolü!)
-    // ✅ Project.Create.* varsa → Çalışır
-    // ✅ Project.Create.New varsa → Çalışır
-    public IActionResult CreateProject([FromBody] CreateProjectDto dto)
-    {
-        return Ok(new { message = "Proje oluşturuldu" });
-    }
-    
+    [AuthorizePermission("Project.Create.New")]
+    public IActionResult CreateProject([FromBody] CreateProjectDto dto) { ... }
+
     [HttpPut("{id}")]
-    [AuthorizePermission("Project.Edit.Any")] 
-    // ✅ Project.All varsa → Çalışır
-    // ✅ Project.Edit.* varsa → Çalışır
-    public IActionResult UpdateProject(int id, [FromBody] UpdateProjectDto dto)
-    {
-        return Ok(new { message = "Proje güncellendi" });
-    }
-    
+    [AuthorizePermission("Project.Edit.Any")]
+    public IActionResult UpdateProject(int id, [FromBody] UpdateProjectDto dto) { ... }
+
     [HttpDelete("{id}")]
-    [AuthorizePermission("Project.Delete.Remove")] 
-    // ✅ Project.All varsa → Çalışır
-    // ✅ Project.Delete.* varsa → Çalışır
-    public IActionResult DeleteProject(int id)
-    {
-        return Ok(new { message = "Proje silindi" });
-    }
-    
+    [AuthorizePermission("Project.Delete.Remove")]
+    public IActionResult DeleteProject(int id) { ... }
+
     [HttpPost("{id}/export")]
-    [AuthorizePermission("Project.Export.PDF")] 
-    // ✅ Project.All varsa → Çalışır
-    // ✅ Project.Export.* varsa → Çalışır
-    // ✅ Project.Export.PDF varsa → Çalışır
-    public IActionResult ExportProjectToPdf(int id)
-    {
-        return Ok(new { message = "Proje PDF olarak export edildi" });
-    }
-    
-    // ✅ ALTERNATİF: Controller seviyesinde genel kontrol
-    // [AuthorizePermission("Project.All")]  // Tüm action'lar için geçerli
-    // public class ProjectsController : ControllerBase { ... }
-    
-    // ❌ HATA: 2 parça yazarsan compile-time'da hata alırsın!
-    // [AuthorizePermission("Project.View")] // ← EXCEPTION!
+    [AuthorizePermission("Project.Export.PDF")]
+    public IActionResult ExportProjectToPdf(int id) { ... }
 }
 ```
 
-### **7.2 Wildcard Permission Kullanım Senaryoları**
+### 8.2 Task Controller'lari
 
 ```csharp
-// ✅ SENARYO 1: Genel Yetki (Project.All)
-// Kullanıcı permission'ları: ["Project.All"]
-// → Tüm Project action'ları çalışır (View, Create, Edit, Delete, Export, vb.)
+[ApiController]
+[Route("api/tasks")]
+[Authorize]
+public class TaskViewsController : ControllerBase
+{
+    [HttpGet]
+    [AuthorizePermission("Task.View.List")]
+    public IActionResult GetTasks() { ... }
 
-// ✅ SENARYO 2: Kategori Bazında (Project.Create.*)
-// Kullanıcı permission'ları: ["Project.Create.*"]
-// → Sadece Create action'ları çalışır (Create.New, Create.Copy, vb.)
-// → Edit, Delete, View çalışmaz!
-
-// ✅ SENARYO 3: Spesifik Yetki (Project.Create.New)
-// Kullanıcı permission'ları: ["Project.Create.New"]
-// → Sadece Create.New çalışır
-// → Create.Copy çalışmaz!
-
-// ✅ SENARYO 4: Hybrid (Hem genel hem spesifik)
-// Kullanıcı permission'ları: ["Project.All", "Task.Create.*"]
-// → Tüm Project işlemleri + Tüm Task Create işlemleri çalışır
-```
-
-### **7.3 TasksController Örneği (Task.All Olan ve Olmayan Durumlar)**
-
-#### **Senaryo 1: Controller'da Task.All VARSA → Action Kontrolü Gereksiz**
-
-```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using MiniJira.WebAPI.Attributes;
-
-namespace MiniJira.WebAPI.Controllers;
+    [HttpGet("{id}")]
+    [AuthorizePermission("Task.View.Detail")]
+    public IActionResult GetTaskById(int id) { ... }
+}
 
 [ApiController]
-[Route("api/[controller]")]
+[Route("api/tasks")]
 [Authorize]
-[AuthorizePermission("Task.All")]  // ✅ Controller seviyesinde wildcard
-public class TasksController : ControllerBase
+public class TaskCommandsController : ControllerBase
 {
-    // ✅ Action seviyesinde kontrol YOK - Task.All zaten tümünü kapsıyor
-    // A kullanıcısı (Task.All var) → Tüm action'lar çalışır (action kontrolü skip edilir)
-    // B kullanıcısı (Task.All yok, Task.Create.New var) → Sadece CreateTask() çalışır
-    
-    [HttpGet]
-    public IActionResult GetTasks()  // ✅ Kontrol yok - Task.All kapsıyor
-    {
-        return Ok(new { message = "Görevler listelendi" });
-    }
-    
     [HttpPost]
-    public IActionResult CreateTask([FromBody] CreateTaskDto dto)  // ✅ Kontrol yok - Task.All kapsıyor
-    {
-        return Ok(new { message = "Görev oluşturuldu" });
-    }
-    
+    [AuthorizePermission("Task.Create.New")]
+    public IActionResult CreateTask([FromBody] CreateTaskDto dto) { ... }
+
+    [HttpPut("{id}")]
+    [AuthorizePermission("Task.Edit.Any")]
+    public IActionResult UpdateTask(int id, [FromBody] UpdateTaskDto dto) { ... }
+
+    [HttpPut("{id}/status")]
+    [AuthorizePermission("Task.Status.Update")]
+    public IActionResult UpdateTaskStatus(int id, [FromBody] UpdateStatusDto dto) { ... }
+
     [HttpPost("{id}/assign")]
-    public IActionResult AssignTask(int id, [FromBody] AssignTaskDto dto)  // ✅ Kontrol yok - Task.All kapsıyor
-    {
-        return Ok(new { message = "Görev atandı" });
-    }
+    [AuthorizePermission("Task.Assign.User")]
+    public IActionResult AssignTask(int id, [FromBody] AssignTaskDto dto) { ... }
 }
-```
-
-**Akış:**
-- **A kullanıcısı (Task.All var):**
-  1. Controller'da `Task.All` var mı? → Evet
-  2. Kullanıcıda `Task.All` var mı? → Evet
-  3. Action kontrolü skip edilir → Tüm action'lar çalışır
-
-- **B kullanıcısı (Task.All yok, Task.Create.New var):**
-  1. Controller'da `Task.All` var mı? → Evet
-  2. Kullanıcıda `Task.All` var mı? → Hayır
-  3. Action kontrolüne geç → `Task.Create.New` kontrolü yapılır
-  4. CreateTask() çalışır, GetTasks() ve AssignTask() çalışmaz
-
----
-
-#### **Senaryo 2: Controller'da Task.All YOKSA → Action Kontrolü Zorunlu**
-
-```csharp
-using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Mvc;
-using MiniJira.WebAPI.Attributes;
-
-namespace MiniJira.WebAPI.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-[Authorize]
-// ❌ Controller seviyesinde Task.All YOK
-public class TasksController : ControllerBase
-{
-    // ✅ Action seviyesinde kontrol ZORUNLU - Spesifik yetkiler için
-    // C kullanıcısı (Task.View.All var) → Sadece GetTasks() çalışır
-    // D kullanıcısı (Task.Create.New var) → Sadece CreateTask() çalışır
-    
-    [HttpGet]
-    [AuthorizePermission("Task.View.All")]  // ✅ ZORUNLU - Sadece View yetkisi
-    public IActionResult GetTasks()
-    {
-        return Ok(new { message = "Görevler listelendi" });
-    }
-    
-    [HttpPost]
-    [AuthorizePermission("Task.Create.New")]  // ✅ ZORUNLU - Sadece Create yetkisi
-    public IActionResult CreateTask([FromBody] CreateTaskDto dto)
-    {
-        return Ok(new { message = "Görev oluşturuldu" });
-    }
-    
-    [HttpPost("{id}/assign")]
-    [AuthorizePermission("Task.Assign.User")]  // ✅ ZORUNLU - Sadece Assign yetkisi
-    public IActionResult AssignTask(int id, [FromBody] AssignTaskDto dto)
-    {
-        return Ok(new { message = "Görev atandı" });
-    }
-}
-```
-
-**Akış:**
-- **C kullanıcısı (Task.View.All var):**
-  1. Controller'da `Task.All` var mı? → Hayır
-  2. Action kontrolüne geç → `Task.View.All` kontrolü yapılır
-  3. GetTasks() çalışır, CreateTask() ve AssignTask() çalışmaz
-
-- **D kullanıcısı (Task.Create.New var):**
-  1. Controller'da `Task.All` var mı? → Hayır
-  2. Action kontrolüne geç → `Task.Create.New` kontrolü yapılır
-  3. CreateTask() çalışır, GetTasks() ve AssignTask() çalışmaz
 ```
 
 ---
 
-## 🌱 **8. SEED DATA (Güncellenmiş - A.B.C Formatında)**
+## 9. SEED DATA
 
 ```csharp
-using Microsoft.EntityFrameworkCore;
-using MiniJira.Domain.Entities;
-using MiniJira.Domain.Enums;
-using MiniJira.Infrastructure.Data;
-
 namespace MiniJira.Infrastructure.Data;
 
 public static class SeedData
 {
     public static void Initialize(AppDbContext context)
     {
-        if (!context.Roles.Any())
+        if (context.Roles.Any()) return;
+
+        var permissions = new List<Permission>
         {
-            // YENİ: A.B.C formatında permission'lar
-            var permissions = new List<Permission>
-            {
-                // Proje Yetkileri (A.B.C formatında)
-                new Permission 
-                { 
-                    Name = "Project.View.All",
-                    MainCategory = "Project",
-                    SubCategory = "View",
-                    ActionName = "All",
-                    Category = "Project",
-                    Description = "Tüm projeleri görüntüle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.Create.New",
-                    MainCategory = "Project",
-                    SubCategory = "Create", 
-                    ActionName = "New",
-                    Category = "Project",
-                    Description = "Yeni proje oluştur",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.Edit.Any",
-                    MainCategory = "Project",
-                    SubCategory = "Edit",
-                    ActionName = "Any",
-                    Category = "Project",
-                    Description = "Herhangi bir projeyi düzenle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.Delete.Remove",
-                    MainCategory = "Project",
-                    SubCategory = "Delete",
-                    ActionName = "Remove",
-                    Category = "Project",
-                    Description = "Projeyi sil",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.Export.PDF",
-                    MainCategory = "Project",
-                    SubCategory = "Export",
-                    ActionName = "PDF",
-                    Category = "Project",
-                    Description = "Projeyi PDF olarak export et",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                
-                // Görev Yetkileri
-                new Permission 
-                { 
-                    Name = "Task.View.All",
-                    MainCategory = "Task",
-                    SubCategory = "View",
-                    ActionName = "All",
-                    Category = "Task",
-                    Description = "Tüm görevleri görüntüle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Task.Create.New",
-                    MainCategory = "Task",
-                    SubCategory = "Create",
-                    ActionName = "New",
-                    Category = "Task",
-                    Description = "Yeni görev oluştur",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Task.Edit.Any",
-                    MainCategory = "Task",
-                    SubCategory = "Edit",
-                    ActionName = "Any",
-                    Category = "Task",
-                    Description = "Herhangi bir görevi düzenle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Task.Assign.User",
-                    MainCategory = "Task",
-                    SubCategory = "Assign",
-                    ActionName = "User",
-                    Category = "Task",
-                    Description = "Görev kullanıcıya ata",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                
-                // Kullanıcı Yetkileri
-                new Permission 
-                { 
-                    Name = "User.View.All",
-                    MainCategory = "User",
-                    SubCategory = "View",
-                    ActionName = "All",
-                    Category = "User",
-                    Description = "Tüm kullanıcıları görüntüle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "User.Edit.Profile",
-                    MainCategory = "User",
-                    SubCategory = "Edit",
-                    ActionName = "Profile",
-                    Category = "User",
-                    Description = "Kullanıcı profilini düzenle",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                
-                // Admin Yetkileri
-                new Permission 
-                { 
-                    Name = "Admin.Role.Manage",
-                    MainCategory = "Admin",
-                    SubCategory = "Role",
-                    ActionName = "Manage",
-                    Category = "Admin",
-                    Description = "Rol ve yetki yönetimi",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Admin.Permission.Manage",
-                    MainCategory = "Admin",
-                    SubCategory = "Permission",
-                    ActionName = "Manage",
-                    Category = "Admin",
-                    Description = "Permission keşif ve yönetimi",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                
-                // ✅ WILDCARD PERMISSION'LAR (YENİ - Performans ve yönetim kolaylığı için)
-                new Permission 
-                { 
-                    Name = "Project.All",
-                    MainCategory = "Project",
-                    SubCategory = "All",
-                    ActionName = "All",
-                    Category = "Project",
-                    Description = "Tüm Project işlemlerine erişim (wildcard)",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Task.All",
-                    MainCategory = "Task",
-                    SubCategory = "All",
-                    ActionName = "All",
-                    Category = "Task",
-                    Description = "Tüm Task işlemlerine erişim (wildcard)",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.Create.*",
-                    MainCategory = "Project",
-                    SubCategory = "Create",
-                    ActionName = "*",
-                    Category = "Project",
-                    Description = "Tüm Project Create işlemlerine erişim (wildcard)",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-                new Permission 
-                { 
-                    Name = "Project.View.*",
-                    MainCategory = "Project",
-                    SubCategory = "View",
-                    ActionName = "*",
-                    Category = "Project",
-                    Description = "Tüm Project View işlemlerine erişim (wildcard)",
-                    Status = PermissionStatus.Active,
-                    CreatedAt = DateTime.UtcNow,
-                    CreatedBy = "System"
-                },
-            };
-            
-            context.Permissions.AddRange(permissions);
-            context.SaveChanges();
-            
-            // Rolleri oluştur (MEVCUT - aynen kalıyor)
-            var adminRole = new Role 
-            { 
-                Name = "Admin",
-                Description = "Sistem yöneticisi, tüm yetkilere sahip",
-                Permissions = permissions
-            };
-            
-            var pmRole = new Role
-            {
-                Name = "ProjectManager",
-                Description = "Proje yöneticisi",
-                Permissions = permissions
-                    .Where(p => p.MainCategory == "Project" || 
-                               p.MainCategory == "Task" ||
-                               p.Name == "User.View.All")
-                    .ToList()
-            };
-            
-            var devRole = new Role
-            {
-                Name = "Developer",
-                Description = "Yazılım geliştirici",
-                Permissions = permissions
-                    .Where(p => p.Name == "Project.View.All" ||
-                               p.Name == "Task.View.All" ||
-                               p.Name == "Task.Create.New" ||
-                               p.Name == "Task.Assign.User")
-                    .ToList()
-            };
-            
-            context.Roles.AddRange(adminRole, pmRole, devRole);
-            context.SaveChanges();
-        }
+            // Project yetkileri
+            P("Project.View.List", "Proje listesini goruntule"),
+            P("Project.View.Detail", "Proje detayini goruntule"),
+            P("Project.View.Members", "Proje uyelerini goruntule"),
+            P("Project.View.Statistics", "Proje istatistiklerini goruntule"),
+            P("Project.Create.New", "Yeni proje olustur"),
+            P("Project.Edit.Any", "Projeyi duzenle"),
+            P("Project.Delete.Remove", "Projeyi sil"),
+            P("Project.Export.PDF", "Projeyi PDF olarak export et"),
+
+            // Task yetkileri
+            P("Task.View.List", "Gorev listesini goruntule"),
+            P("Task.View.Detail", "Gorev detayini goruntule"),
+            P("Task.Create.New", "Yeni gorev olustur"),
+            P("Task.Edit.Any", "Gorevi duzenle"),
+            P("Task.Status.Update", "Gorev durumunu guncelle"),
+            P("Task.Assign.User", "Gorev kullaniciya ata"),
+
+            // User yetkileri
+            P("User.View.List", "Kullanici listesini goruntule"),
+            P("User.View.Detail", "Kullanici detayini goruntule"),
+            P("User.Edit.Profile", "Kullanici profilini duzenle"),
+
+            // Admin yetkileri
+            P("Admin.Role.View", "Rolleri goruntule"),
+            P("Admin.Role.Manage", "Rol yetkilerini yonet"),
+            P("Admin.Role.Assign", "Kullaniciya rol ata"),
+            P("Admin.Role.Remove", "Kullanicidan rol kaldir"),
+            P("Admin.Permission.View", "Yetkileri goruntule"),
+            P("Admin.Permission.Discover", "Yeni yetkileri kesfet"),
+            P("Admin.Permission.Approve", "Kesfedilen yetkiyi onayla"),
+            P("Admin.Permission.Ignore", "Kesfedilen yetkiyi reddet"),
+            P("Admin.Permission.Status", "Yetki durumunu guncelle"),
+        };
+
+        context.Permissions.AddRange(permissions);
+        context.SaveChanges();
+
+        // Admin: tum yetkiler
+        var adminRole = new Role
+        {
+            Name = "Admin",
+            Description = "Sistem yoneticisi, tum yetkilere sahip",
+            Permissions = permissions
+        };
+
+        // PM: Project + Task + User.View
+        var pmRole = new Role
+        {
+            Name = "ProjectManager",
+            Description = "Proje yoneticisi",
+            Permissions = permissions
+                .Where(p => p.MainCategory == "Project" ||
+                           p.MainCategory == "Task" ||
+                           p.Name == "User.View.List" ||
+                           p.Name == "User.View.Detail")
+                .ToList()
+        };
+
+        // Developer: sadece goruntuleme + gorev olusturma
+        var devRole = new Role
+        {
+            Name = "Developer",
+            Description = "Yazilim gelistirici",
+            Permissions = permissions
+                .Where(p => p.Name == "Project.View.List" ||
+                           p.Name == "Project.View.Detail" ||
+                           p.Name == "Task.View.List" ||
+                           p.Name == "Task.View.Detail" ||
+                           p.Name == "Task.Create.New" ||
+                           p.Name == "Task.Status.Update")
+                .ToList()
+        };
+
+        context.Roles.AddRange(adminRole, pmRole, devRole);
+        context.SaveChanges();
+    }
+
+    private static Permission P(string name, string description)
+    {
+        var parts = name.Split('.');
+        return new Permission
+        {
+            Name = name,
+            MainCategory = parts[0],
+            SubCategory = parts[1],
+            ActionName = parts[2],
+            Description = description,
+            Status = PermissionStatus.Active,
+            CreatedAt = DateTime.UtcNow,
+            CreatedBy = "System"
+        };
     }
 }
 ```
 
 ---
 
-## 🚀 **9. DEPENDENCY INJECTION (Program.cs)**
+## 10. DEPENDENCY INJECTION (Program.cs)
 
 ```csharp
-using Microsoft.Extensions.Caching.Memory;
-using MiniJira.Application.Services;
-using MiniJira.Infrastructure.Services;
-
 var builder = WebApplication.CreateBuilder(args);
 
-// ... diğer servisler
+// Redis cache
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis");
+});
 
-// Memory cache ekle
-builder.Services.AddMemoryCache();
-
-// MEVCUT: PermissionService'i kaydet
+// Permission servisleri
+builder.Services.AddSingleton<IPermissionCache, RedisPermissionCache>();
 builder.Services.AddScoped<IPermissionService, PermissionService>();
-
-// YENİ: PermissionRegistry'i kaydet
 builder.Services.AddScoped<IPermissionRegistry, PermissionRegistry>();
-
-// ... diğer servisler
 
 var app = builder.Build();
 
-// Seed data'yı çalıştır
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -1709,261 +1204,289 @@ using (var scope = app.Services.CreateScope())
 app.Run();
 ```
 
----
+appsettings.json:
 
-## ⚡ **9.1 PERFORMANS OPTİMİZASYONLARI**
-
-### **9.1.1 Cache Stratejisi**
-
-```csharp
-// ✅ User bazında tek cache key (100 permission = 1 key, eski: 100 key)
-var cacheKey = $"userpermissions:{userId}";
-
-// ✅ Cache süresi: 15 dakika
-_cache.Set(cacheKey, userPermissions, TimeSpan.FromMinutes(15));
-
-// ✅ Cache invalidation: Rol/permission değişikliğinde
-permissionService.InvalidateUserCache(userId);
-```
-
-**Performans:**
-- İlk request: 50-100ms (DB'den çek)
-- Sonraki request'ler: <1ms (cache'den)
-- Memory: ~2-3KB per user (100 permission)
-
-### **9.1.2 Optimize DB Sorgusu**
-
-```csharp
-// ❌ ESKİ (Yavaş - Include chain):
-var user = await _db.Users
-    .Include(u => u.Roles)
-        .ThenInclude(r => r.Permissions)  // Tüm entity'ler!
-    .FirstOrDefaultAsync(u => u.Id == userId);
-// → ~50-100KB veri çekiyor
-
-// ✅ YENİ (Hızlı - Sadece projection):
-var permissions = await _db.UserRoles
-    .Where(ur => ur.UserId == userId)
-    .SelectMany(ur => ur.Role.RolePermissions)
-    .Select(rp => rp.Permission.Name)  // Sadece name!
-    .Distinct()
-    .ToListAsync();
-// → ~2KB veri çekiyor (50x daha az!)
-```
-
-**Fark:**
-- Eski: ~50-100KB (entity'ler)
-- Yeni: ~2KB (sadece name'ler)
-- **50x daha az veri transferi!**
-
-### **9.1.3 Wildcard Kontrolü Optimizasyonu**
-
-```csharp
-// ✅ Öncelik sırası: En genelden en spesifike
-// Project.All varsa → Direkt true dön, arama yapma!
-
-if (userPermissions.Contains($"{parts[0]}.All"))
-    return true;  // ✅ Direkt dön, arama yok!
-
-if (userPermissions.Contains($"{parts[0]}.{parts[1]}.*"))
-    return true;  // ✅ Direkt dön, arama yok!
-
-// Wildcard yoksa spesifik arama
-return userPermissions.Contains(requestedPermission);
-```
-
-**Performans:**
-- `Project.All` varsa: 1 kontrol (direkt dön)
-- Wildcard yoksa: 2-3 kontrol (spesifik arama)
-- **HashSet.Contains() → O(1) → Çok hızlı!**
-
-### **9.1.4 Performans Karşılaştırması**
-
-| Yaklaşım | İlk Request | Sonraki Request'ler | Memory | Verimlilik |
-|----------|-------------|---------------------|--------|------------|
-| ❌ Her seferinde DB | 50-100ms | 50-100ms | 0 | Çok yavaş |
-| ✅ Cache (user bazında) | 50-100ms | <1ms | 2-3KB/user | Hızlı |
-| ✅ Wildcard kontrolü | - | <1ms | - | Çok hızlı |
-
-### **9.1.5 Controller Wildcard Kontrolü Optimizasyonu**
-
-```csharp
-// ✅ Controller seviyesinde Task.All varsa → Action kontrolü skip edilir
-// Performans: Task.All varsa → 1 DB sorgusu yerine 0 (action kontrolü yok!)
-
-// Senaryo 1: Task.All var
-// Controller: [AuthorizePermission("Task.All")]
-// Action: (kontrol yok)
-// → Sadece Task.All kontrolü yapılır (1 kontrol)
-// → Action kontrolü skip edilir (0 kontrol)
-
-// Senaryo 2: Task.All yok
-// Controller: (Task.All yok)
-// Action: [AuthorizePermission("Task.Create.New")]
-// → Task.All kontrolü yapılır (1 kontrol - false)
-// → Action kontrolü yapılır (1 kontrol - Task.Create.New)
-// → Toplam: 2 kontrol
-```
-
-**Performans:**
-- `Task.All` varsa: 1 kontrol (controller seviyesinde) → Action kontrolü skip edilir
-- `Task.All` yoksa: 2 kontrol (controller + action) → Normal akış
-- **Reflection maliyeti:** ~0.1-0.5ms per request (kabul edilebilir)
-
-### **9.1.6 Cache Invalidation Stratejisi**
-
-```csharp
-// ✅ Rol yetkileri değiştiğinde
-public async Task UpdateRolePermissionsAsync(int roleId, List<string> permissions)
+```json
 {
-    // ... rol güncelle
-    
-    // Bu role sahip TÜM kullanıcıların cache'ini temizle
-    var userIds = await _db.UserRoles
-        .Where(ur => ur.RoleId == roleId)
-        .Select(ur => ur.UserId)
-        .ToListAsync();
-    
-    foreach (var userId in userIds)
-    {
-        _permissionService.InvalidateUserCache(userId);
-    }
+  "ConnectionStrings": {
+    "DefaultConnection": "Host=localhost;Port=5432;Database=taskmanagement;...",
+    "Redis": "localhost:6379"
+  }
 }
 ```
 
+docker-compose.yml'a Redis container eklenir:
+
+```yaml
+redis:
+  image: redis:7-alpine
+  ports:
+    - "6379:6379"
+  volumes:
+    - redis_data:/data
+```
+
 ---
 
-## 🎯 **10. SİSTEM ÖZETİ**
+## 11. ADMIN PANEL GORUNUMU
 
-### **10.1 Mevcut Yapıdan Kalanlar:**
-
-1. ✅ **Database tabloları** - Users, Roles, Permissions, UserRoles, RolePermissions, UserPermissions
-2. ✅ **PermissionService** - Yetki kontrol mekanizması (status kontrolü eklendi)
-3. ✅ **AuthorizePermissionAttribute** - Controller yetkilendirme (format kontrolü eklendi)
-4. ✅ **RolesController** - Rol yönetimi API'leri (status kontrolü eklendi)
-5. ✅ **React Admin Paneli** - Görsel yetki yönetimi
-6. ✅ **Cache mekanizması** - Performans için
-
-### **10.2 Yeni Eklenenler:**
-
-1. ✅ **A.B.C Formatı** - Zorunlu 3 parçalı yetki isimlendirmesi
-2. ✅ **DiscoveredPermissions tablosu** - Keşif kayıtları
-3. ✅ **PermissionRegistry Service** - Otomatik keşif ve yönetim
-4. ✅ **PermissionStatus** - Active/Inactive/Deprecated durum yönetimi
-5. ✅ **Admin onay mekanizması** - Güvenlik için manuel onay
-6. ✅ **PermissionsController** - Keşif ve durum yönetimi API'leri
-7. ✅ **Parse validation** - Compile-time ve runtime format kontrolü
-8. ✅ **Wildcard Permission Desteği** - Project.All → Project.Create.New'i kapsar
-9. ✅ **Optimize Cache Stratejisi** - User bazında tek cache key (50x daha hızlı)
-10. ✅ **Optimize DB Sorgusu** - Sadece permission name'leri (50x daha az veri)
-11. ✅ **Cache Invalidation** - Rol/permission değişikliğinde otomatik temizleme
-12. ✅ **Akıllı Controller Kontrolü** - Task.All varsa action kontrolü skip edilir (daha hızlı)
-
-### **10.3 Sistem Akışı:**
+### 11.1 Yetki Atama Ekrani
 
 ```
-1. DEVELOPER:
-   ✅ ZORUNLU 3 parça yazar: [AuthorizePermission("Project.Create.New")]
-   ❌ 2 veya 4 parça yazarsa → COMPILE-TIME EXCEPTION!
+Rol: ProjectManager - Yetki Atama
 
-2. SİSTEM:
-   ✅ Parse eder: "Project", "Create", "New"
-   ✅ Kod tarar, yeni permission'ları keşfeder
-   ✅ DB'de yoksa → DiscoveredPermissions tablosuna ekler (Status: Pending)
+Filtre: [Project v] [Tumu v]  Ara: [____________]
+
+  Project
+    View                              [Tumunu Sec]
+      [x] Project.View.List
+      [x] Project.View.Detail
+      [ ] Project.View.Members
+      [ ] Project.View.Statistics
+    Create                            [Tumunu Sec]
+      [x] Project.Create.New
+    Edit                              [Tumunu Sec]
+      [ ] Project.Edit.Any
+    Delete                            [Tumunu Sec]
+      [ ] Project.Delete.Remove
+
+  Task
+    View                              [Tumunu Sec]
+      [x] Task.View.List
+      [x] Task.View.Detail
+    Create                            [Tumunu Sec]
+      [x] Task.Create.New
+
+                            [Kaydet]
+```
+
+"Tumunu Sec" butonu o kategorideki mevcut yetkileri tek tek secer.
+Wildcard degildir. Ileride yeni yetki eklenirse otomatik secilmez.
+
+### 11.2 Yeni Yetki Kesfi Ekrani
+
+```
+Yeni Kesfedilen Yetkiler
+
++-----------------------------+------------------+
+| Yetki                       | Islem            |
++-----------------------------+------------------+
+| Project.Archive.Old         | [Onayla] [Reddet]|
+| Task.Comment.Add            | [Onayla] [Reddet]|
++-----------------------------+------------------+
+
+Onayla tiklaninca:
++------------------------------------------+
+| Yetki: Project.Archive.Old               |
+|                                          |
+| Hangi rollere atansin?                   |
+|   [x] Admin                             |
+|   [ ] ProjectManager                    |
+|   [ ] Developer                         |
+|                                          |
+|              [Onayla ve Ata]             |
++------------------------------------------+
+```
+
+Onaylama ve rol atama tek adimda yapilir.
+
+---
+
+## 12. CACHE INVALIDATION
+
+Cache su durumlarda temizlenir:
+
+```
+1. Rol yetkileri degistiginde
+   → O role sahip TUM kullanicilarin cache'i temizlenir
+
+2. Kullaniciya rol atandiginda/kaldirildiginda
+   → O kullanicinin cache'i temizlenir
+
+3. Permission durumu degistiginde (Active → Inactive)
+   → O yetkiye sahip TUM kullanicilarin cache'i temizlenir
+
+4. Yeni yetki onaylanip rollere atandiginda
+   → O rollere sahip kullanicilarin cache'i temizlenir
+```
+
+---
+
+## 13. OLCEKLEME PLANI
+
+### 13.1 Cache Stratejisi
+
+Bastan Redis kullanilir. Olcek farketmez, her durumda hazir:
+
+```
+Redis Avantajlari:
+  - Uygulama RAM'ini kullanmaz
+  - Birden fazla servis ayni cache'i paylasir (Asama 2 icin hazir)
+  - Uygulama yeniden baslatilsa bile cache kaybolmaz
+  - Yetki degistiginde tum servisler aninda guncel veriyi gorur
+
+Cache Yapisi:
+  Key: "userpermissions:{userId}"
+  Value: JSON string (HashSet<string>)
+  TTL: 15 dakika
+
+RAM Hesabi (Redis tarafinda):
+  200 yetki x ~30 byte = ~6 KB per user (JSON formatinda)
+  1.000 user = 6 MB
+  100.000 user = 600 MB
+  Redis bunu rahat tasir
+```
+
+### 13.2 DB Stratejisi (2 Asamali)
+
+```
+Asama 1 (Simdi - Mini Jira):
+  Shared DB, Separate Schema
+  Identity Service → identity schema
+  Project Service  → project schema
+  Task Service     → task schema
+  Ayni PostgreSQL sunucusu
+
+Asama 2 (Baska projelerde kullanmak istediginde):
+  Identity Service → ayri DB, ayri microservis
+  Hazir bir auth servisi olarak elinde bulunur
+  Yeni projeye baslayinca ayni servisi baglarsin
+  Diger servisler Identity Service'e HTTP ile sorar
+  Kod degismez, sadece connection string ve DI kaydi degisir
+```
+
+### 13.3 Servisler Arasi Yetki Kontrolu (Asama 2 icin)
+
+Bu bolum Asama 2 icin gecerlidir (Identity Service ayri DB/microservis oldugunda).
+Asama 1'de ayni DB kullanildigi icin direkt sorgu yeterlidir.
+
+DB ayrildiginda diger servisler yetkileri HTTP ile sorar:
+
+```
+Task Service → GET /api/auth/permissions/{userId} → Identity Service
+Task Service → cevabi cache'ler → Contains() ile kontrol eder
+```
+
+```csharp
+// Asama 1: DB'den direkt oku
+builder.Services.AddScoped<IPermissionService, DbPermissionService>();
+
+// Asama 2: HTTP ile Identity Service'e sor
+builder.Services.AddScoped<IPermissionService, HttpPermissionService>();
+```
+
+Interface ayni kaldigi icin uygulama kodu, controller'lar, filter'lar degismez.
+
+### 13.4 JWT Token Yapisi ve Yetki Tasima (Asama 2 icin)
+
+Bu bolum Asama 2 icin gecerlidir.
+
+JWT'de yetki bilgisi TUTULMAZ. Token yalin kalir:
+
+```json
+{
+  "sub": "5",
+  "name": "Ahmet",
+  "role": "ProjectManager",
+  "exp": 1234567890
+}
+```
+
+Neden?
+- 200 yetki token'a koyulursa ~8KB → HTTP header limitine carpar
+- Yetki degisikligi aninda yansimaz (token suresi dolmadan)
+- Yetkiler PermissionService uzerinden sorulur (cache ile hizli)
+
+Peki yetkiler nasil tasinir? JWT sadece userId'yi tasir, bu yeterli:
+
+```
+JWT tasiyor      → KIM oldugunu (userId)
+Identity Service → NE YAPABILECEGINI (permissions)
+```
+
+Akis:
+
+```
+1. Ahmet login oldu → JWT aldi (icinde sub: 5 var)
+
+2. Ahmet → POST /api/tasks → Task Service'e istek atti
+   Header: Authorization: Bearer eyJhbGciOi...
+
+3. Task Service JWT'yi parse etti → userId: 5 aldi
+
+4. Task Service: "5 nolu adamin yetkileri ne? Sorayim"
+   → GET /api/auth/permissions/5 → Identity Service
+
+5. Identity Service → kendi DB'sinden cekti → dondu:
+   ["Task.View.List", "Task.Create.New", "Project.View.List"]
+
+6. Task Service → bu listeyi cache'ledi (15 dk)
+
+7. Task Service → Contains("Task.Create.New") → true → islem yapilir
+
+Sonraki isteklerde:
+   Cache'den bak → var → Identity Service'e sormaya gerek yok
+   Cache suresi dolunca → tekrar sor → cache'i yenile
+```
+
+JWT bir kimlik karti gibi dusunulebilir. Ustunde adin ve numaranin yaziyor.
+Ama hangi odalara girebilecegin guvenlik masasinda (Identity Service) kayitli.
+
+---
+
+## 14. SISTEM AKISI (Ozet)
+
+```
+1. GELISTIRICI:
+   [AuthorizePermission("Project.Archive.Old")] yazar
+   Format: A.B.C zorunlu, baska format derlenmez
+
+2. SISTEM (Otomatik Kesif):
+   Kodu tarar → yeni yetkiyi bulur
+   DiscoveredPermissions tablosuna yazar (Status: Pending)
 
 3. ADMIN:
-   ✅ Paneli açar, yeni yetkiyi görür
-   ✅ Onaylar → Status = Approved, Permission'a eklenir (Active)
-   ❌ Reddeder → Status = Ignored
-   🚫 Sonradan → Status = Inactive yapabilir (pasifleştirir)
+   Panelden gorur → onaylar + rollere atar (tek adimda)
+   Veya reddeder
 
-4. KULLANIM (WILDCARD DESTEĞİ İLE):
-   ✅ Kullanıcı "Project.All" permission'ına sahipse:
-      → [AuthorizePermission("Project.Create.New")] → ✅ Çalışır (wildcard kontrolü!)
-      → [AuthorizePermission("Project.Edit.Any")] → ✅ Çalışır
-      → [AuthorizePermission("Project.Delete.Remove")] → ✅ Çalışır
-   
-   ✅ Kullanıcı "Project.Create.*" permission'ına sahipse:
-      → [AuthorizePermission("Project.Create.New")] → ✅ Çalışır
-      → [AuthorizePermission("Project.Create.Copy")] → ✅ Çalışır
-      → [AuthorizePermission("Project.Edit.Any")] → ❌ Çalışmaz (Edit yetkisi yok)
-   
-   ✅ CONTROLLER SEVİYESİNDE TASK.ALL VARSA:
-      → Controller: [AuthorizePermission("Task.All")]
-      → Action: [AuthorizePermission("Task.Create.New")] (opsiyonel - skip edilir)
-      
-      A kullanıcısı (Task.All var):
-         → Controller kontrolü: Task.All var mı? → ✅ Evet
-         → Action kontrolü: SKIP EDİLİR → Tüm action'lar çalışır
-      
-      B kullanıcısı (Task.All yok, Task.Create.New var):
-         → Controller kontrolü: Task.All var mı? → ❌ Hayır
-         → Action kontrolü: Task.Create.New var mı? → ✅ Evet
-         → Sadece CreateTask() çalışır
-   
-   ✅ CONTROLLER SEVİYESİNDE TASK.ALL YOKSA:
-      → Controller: (Task.All yok)
-      → Action: [AuthorizePermission("Task.Create.New")] (ZORUNLU!)
-      
-      C kullanıcısı (Task.View.All var):
-         → Controller kontrolü: Task.All var mı? → ❌ Hayır
-         → Action kontrolü: Task.View.All var mı? → ✅ Evet
-         → Sadece GetTasks() çalışır
-   
-   ✅ PERFORMANS:
-      → İlk request: Cache'den kontrol (<1ms)
-      → Cache miss: DB'den çek (50-100ms, optimize sorgu)
-      → Wildcard kontrolü: Memory'de O(1) lookup (çok hızlı!)
-      → Controller wildcard varsa: Action kontrolü skip edilir (daha hızlı!)
-   
-   ✅ Sadece Status = Active olan permission'lar çalışır
-   🚫 Inactive olanlar → kimse kullanamaz (cache temizlenir)
-   ⚠️ Deprecated → artık koddan kaldırıldı
+4. RUNTIME (Kullanici istek attiginda):
+   Filter: "Bu endpoint Project.Archive.Old istiyor"
+   PermissionService: Cache'den HashSet al → Contains() → true/false
+   Sonuc: 200 OK veya 403 Forbidden
+
+5. CACHE INVALIDATION:
+   Yetki/rol degistiginde ilgili kullanicilarin cache'i temizlenir
+   Sonraki istekte DB'den tekrar cekilir
 ```
-
-### **10.4 Avantajlar:**
-
-1. **✅ Standardization:** 3 parça format zorunluluğu ile tutarlılık
-2. **✅ Compile-time Safety:** Format hataları compile-time'da yakalanır
-3. **✅ Güvenlik:** Admin onay mekanizması ile kontrol
-4. **✅ Esneklik:** Pasifleştirme ile özellik kapatma
-5. **✅ Otomasyon:** Otomatik permission keşfi
-6. **✅ Audit Trail:** Tüm değişiklikler kaydedilir
-7. **✅ Wildcard Permission Desteği:** Project.All → Tüm Project işlemlerini kapsar (yönetim kolaylığı)
-8. **✅ Yüksek Performans:** 
-   - User bazında cache (50x daha hızlı)
-   - Optimize DB sorgusu (50x daha az veri)
-   - Wildcard kontrolü O(1) lookup
-9. **✅ Cache Invalidation:** Rol/permission değişikliğinde otomatik temizleme
-10. **✅ Geriye Uyumluluk:** Mevcut yapı korundu
 
 ---
 
-## 📝 **11. KURULUM ADIMLARI**
-
-### **Adım 1: Database Migration**
+## 15. KURULUM ADIMLARI
 
 ```bash
-# Entity Framework Migration oluştur
-dotnet ef migrations add AddPermissionDiscoveryAndStatus --project Infrastructure --startup-project WebAPI
+# 1. Migration olustur
+dotnet ef migrations add AddPermissionSystem --project Infrastructure --startup-project WebAPI
 
-# Migration'ı uygula
+# 2. Migration uygula
 dotnet ef database update --project Infrastructure --startup-project WebAPI
 ```
 
-### **Adım 2: Services'i Kaydet**
-
-```csharp
-// Program.cs
-builder.Services.AddMemoryCache();
-builder.Services.AddScoped<IPermissionService, PermissionService>();
-builder.Services.AddScoped<IPermissionRegistry, PermissionRegistry>();
+```bash
+# 3. Redis'i baslat (docker-compose icinde)
+docker-compose up -d redis
 ```
 
-### **Adım 3: Seed Data**
-
 ```csharp
-// Program.cs
+// 4. Program.cs'e ekle
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis");
+});
+builder.Services.AddSingleton<IPermissionCache, RedisPermissionCache>();
+builder.Services.AddScoped<IPermissionService, PermissionService>();
+builder.Services.AddScoped<IPermissionRegistry, PermissionRegistry>();
+
+// 5. Seed data calistir
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -1971,25 +1494,8 @@ using (var scope = app.Services.CreateScope())
 }
 ```
 
-### **Adım 4: Controller'lara Attribute Ekle (3 Parça Format!)**
-
 ```csharp
-// ✅ DOĞRU: 3 parça
-[AuthorizePermission("Project.Create.New")]
-
-// ❌ YANLIŞ: 2 parça (compile-time exception!)
-[AuthorizePermission("Project.Create")]
+// 6. Controller'lara attribute ekle
+[AuthorizePermission("Project.View.List")]   // 3 parca zorunlu
+public IActionResult GetProjects() { ... }
 ```
-
----
-
-## 🎉 **SONUÇ**
-
-Bu güncellenmiş sistem, **mevcut yapıyı koruyarak** yeni özellikler ekler:
-
-- ✅ **Mevcut kodlar çalışmaya devam eder** (sadece format güncellemesi gerekir)
-- ✅ **Yeni özellikler eklenir** (discovery, status yönetimi)
-- ✅ **Geriye uyumluluk sağlanır** (mevcut tablolar korunur)
-- ✅ **Production-ready** bir sistem oluşturulur
-
-**Tüm mevcut yapı korundu, sadece yeni özellikler eklendi!** 🚀
